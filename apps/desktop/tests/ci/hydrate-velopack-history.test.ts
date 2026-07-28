@@ -1,8 +1,10 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
+
+import { APP_PRODUCT_CONFIG } from '@/config/product';
 
 type HydrateVelopackHistory = (
     projectRoot: string,
@@ -19,79 +21,114 @@ async function loadHydrator(): Promise<HydrateVelopackHistory | undefined> {
     }
 }
 
-async function createFixture() {
+async function createFixture(product: unknown) {
     const root = await mkdtemp(join(tmpdir(), 'touchai-velopack-history-'));
-    const releaseDir = join(root, 'release');
-    await mkdir(releaseDir, { recursive: true });
-    await writeFile(
-        join(root, 'product.json'),
-        JSON.stringify(
-            {
-                schemaVersion: 1,
-                services: {
-                    updates: {
-                        baseUrl: 'https://updates.example.test/touchai-app/v1',
-                    },
-                },
-            },
-            null,
-            4
-        )
-    );
-    return { root, releaseDir };
+    await writeFile(join(root, 'product.json'), `${JSON.stringify(product, null, 4)}\n`, 'utf8');
+    return root;
 }
 
-function createFetchMock() {
-    const safeFileName = 'TouchAI-beta-0.2.0-beta.1-windows-full.nupkg';
-    const unsafeFileName = '../escape.nupkg';
-    const feed = {
-        Assets: [
-            { FileName: safeFileName, Type: 'Full' },
-            { FileName: unsafeFileName, Type: 'Full' },
-            { FileName: 'release-notes.md', Type: 'Notes' },
-        ],
+function productWithNightlyRetention(keepVersions: number) {
+    const product = JSON.parse(JSON.stringify(APP_PRODUCT_CONFIG));
+    product.services.updates.deployment = {
+        ...product.services.updates.deployment,
+        r2HotAssetVersions: {
+            stable: 2,
+            beta: 2,
+            nightly: keepVersions,
+        },
     };
+    return product;
+}
 
+function release(tagName: string, publishedAt: string) {
     return {
-        safeFileName,
-        unsafeFileName,
-        fetchMock: vi.fn(async (input: string | URL | Request) => {
+        tag_name: tagName,
+        published_at: publishedAt,
+        assets: [],
+    };
+}
+
+async function exists(path: string) {
+    try {
+        await stat(path);
+        return true;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+            return false;
+        }
+        throw error;
+    }
+}
+
+describe('hydrateVelopackHistory', () => {
+    it('hydrates only safe package file names from retained releases', async () => {
+        const hydrateVelopackHistory = await loadHydrator();
+        const product = productWithNightlyRetention(1);
+        const root = await createFixture(product);
+        const releaseDir = join(root, 'release');
+        const feedUrl = `${product.services.updates.baseUrl}/releases.nightly.json`;
+        const version = '0.3.0-nightly.20260523.3';
+        const safeFileName = `TouchAI-nightly-${version}-windows-full.nupkg`;
+        const unsafeFileName = '../escape.nupkg';
+        const feed = {
+            Assets: [
+                {
+                    PackageId: product.identifier,
+                    Version: version,
+                    Type: 'Full',
+                    FileName: safeFileName,
+                },
+                {
+                    PackageId: product.identifier,
+                    Version: version,
+                    Type: 'Full',
+                    FileName: unsafeFileName,
+                },
+                {
+                    PackageId: product.identifier,
+                    Version: version,
+                    Type: 'Notes',
+                    FileName: 'release-notes.md',
+                },
+            ],
+        };
+        const fetchMock = vi.fn<typeof fetch>(async (input) => {
             const url = input.toString();
-            if (url.endsWith('/releases.beta.json')) {
+
+            if (url === feedUrl) {
                 return new Response(JSON.stringify(feed), {
                     headers: { 'content-type': 'application/json' },
                 });
             }
+
+            if (new URL(url).hostname === 'api.github.com') {
+                return new Response(
+                    JSON.stringify([release(`v${version}`, '2026-05-23T00:00:00Z')]),
+                    { headers: { 'content-type': 'application/json' } }
+                );
+            }
+
             if (url.endsWith(`/${encodeURIComponent(safeFileName)}`)) {
                 return new Response('safe package');
             }
 
-            return new Response('not found', { status: 404 });
-        }) as unknown as typeof fetch,
-    };
-}
-
-describe('hydrateVelopackHistory', () => {
-    it('hydrates only safe package file names from an existing feed', async () => {
-        const hydrateVelopackHistory = await loadHydrator();
-        const { root, releaseDir } = await createFixture();
-        const { safeFileName, unsafeFileName, fetchMock } = createFetchMock();
+            return new Response(null, { status: 404 });
+        });
         const originalFetch = globalThis.fetch;
-        globalThis.fetch = fetchMock;
+        globalThis.fetch = fetchMock as unknown as typeof fetch;
 
         try {
+            await mkdir(releaseDir, { recursive: true });
             expect(hydrateVelopackHistory).toBeTypeOf('function');
-            await hydrateVelopackHistory?.(root, releaseDir, 'beta');
+            await hydrateVelopackHistory?.(root, releaseDir, 'nightly');
 
             await expect(readFile(join(releaseDir, safeFileName), 'utf8')).resolves.toBe(
                 'safe package'
             );
-            await expect(readFile(join(root, 'escape.nupkg'), 'utf8')).rejects.toMatchObject({
-                code: 'ENOENT',
-            });
+            await expect(exists(join(root, 'escape.nupkg'))).resolves.toBe(false);
 
             const hydratedFeed = JSON.parse(
-                await readFile(join(releaseDir, 'releases.beta.json'), 'utf8')
+                await readFile(join(releaseDir, 'releases.nightly.json'), 'utf8')
             );
             expect(
                 hydratedFeed.Assets.map((asset: { FileName: string }) => asset.FileName)
@@ -99,6 +136,94 @@ describe('hydrateVelopackHistory', () => {
             expect(fetchMock).not.toHaveBeenCalledWith(
                 expect.stringContaining(encodeURIComponent(unsafeFileName)),
                 expect.anything()
+            );
+        } finally {
+            globalThis.fetch = originalFetch;
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('keeps only retained GitHub release versions from the existing channel feed', async () => {
+        const hydrateVelopackHistory = await loadHydrator();
+        const product = productWithNightlyRetention(2);
+        const root = await createFixture(product);
+        const releaseDir = join(root, 'release');
+        const feedUrl = `${product.services.updates.baseUrl}/releases.nightly.json`;
+        const keptPackage = 'TouchAI-nightly-0.3.0-nightly.20260523.3-windows-full.nupkg';
+        const oldPackage = 'TouchAI-nightly-0.3.0-nightly.20260522.2-windows-full.nupkg';
+        const orphanPackage = 'TouchAI-nightly-0.3.0-nightly.20260521.1-windows-full.nupkg';
+        const feed = {
+            Assets: [
+                {
+                    PackageId: product.identifier,
+                    Version: '0.3.0-nightly.20260523.3',
+                    Type: 'Full',
+                    FileName: keptPackage,
+                },
+                {
+                    PackageId: product.identifier,
+                    Version: '0.3.0-nightly.20260522.2',
+                    Type: 'Full',
+                    FileName: oldPackage,
+                },
+                {
+                    PackageId: product.identifier,
+                    Version: '0.3.0-nightly.20260521.1',
+                    Type: 'Full',
+                    FileName: orphanPackage,
+                },
+            ],
+        };
+        const fetchMock = vi.fn<typeof fetch>(async (input) => {
+            const url = input.toString();
+
+            if (url === feedUrl) {
+                return new Response(JSON.stringify(feed), {
+                    headers: { 'content-type': 'application/json' },
+                });
+            }
+
+            if (new URL(url).hostname === 'api.github.com') {
+                return new Response(
+                    JSON.stringify([
+                        release('v0.3.0-nightly.20260524.4', '2026-05-24T00:00:00Z'),
+                        release('v0.3.0-nightly.20260523.3', '2026-05-23T00:00:00Z'),
+                        release('v0.3.0-nightly.20260522.2', '2026-05-22T00:00:00Z'),
+                    ]),
+                    { headers: { 'content-type': 'application/json' } }
+                );
+            }
+
+            if (url.endsWith(keptPackage)) {
+                return new Response('kept package');
+            }
+
+            return new Response(null, { status: 404 });
+        });
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+        try {
+            await mkdir(releaseDir, { recursive: true });
+            expect(hydrateVelopackHistory).toBeTypeOf('function');
+            await hydrateVelopackHistory?.(root, releaseDir, 'nightly');
+
+            const hydratedFeed = JSON.parse(
+                await readFile(join(releaseDir, 'releases.nightly.json'), 'utf8')
+            );
+            expect(
+                hydratedFeed.Assets.map((asset: { FileName: string }) => asset.FileName)
+            ).toEqual([keptPackage]);
+            await expect(readFile(join(releaseDir, keptPackage), 'utf8')).resolves.toBe(
+                'kept package'
+            );
+            await expect(exists(join(releaseDir, oldPackage))).resolves.toBe(false);
+            await expect(exists(join(releaseDir, orphanPackage))).resolves.toBe(false);
+            expect(fetchMock).not.toHaveBeenCalledWith(
+                `${product.services.updates.baseUrl}/${oldPackage}`
+            );
+            expect(fetchMock).not.toHaveBeenCalledWith(
+                `${product.services.updates.baseUrl}/${orphanPackage}`
             );
         } finally {
             globalThis.fetch = originalFetch;
