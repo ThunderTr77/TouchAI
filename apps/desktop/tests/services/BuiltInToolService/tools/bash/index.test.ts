@@ -128,6 +128,7 @@ describe('executeBashTool request construction', () => {
         const config = {
             ...DEFAULT_BASH_TOOL_CONFIG,
             defaultWorkingDirectory: 'D:/project',
+            allowedWorkingDirectories: ['D:/other'],
             compactOutput: true,
             timeoutMs: 20000,
         };
@@ -143,6 +144,7 @@ describe('executeBashTool request construction', () => {
                 executionId: 'call-1',
                 command: 'git diff',
                 workingDirectory: 'D:/other',
+                allowedWorkingDirectories: ['D:/other'],
                 timeoutMs: 20000,
                 compactOutput: true,
                 rawOutput: true,

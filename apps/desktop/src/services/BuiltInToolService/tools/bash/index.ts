@@ -52,6 +52,7 @@ async function executeCancelableBash(
         executionId: string;
         command: string;
         workingDirectory?: string | null;
+        allowedWorkingDirectories?: string[];
         timeoutMs?: number | null;
         compactOutput?: boolean;
         rawOutput?: boolean;
@@ -158,6 +159,7 @@ export async function executeBashTool(
             executionId: context.callId,
             command: commandContext.command,
             workingDirectory: commandContext.workingDirectory,
+            allowedWorkingDirectories: config.allowedWorkingDirectories,
             timeoutMs: config.timeoutMs,
             compactOutput: config.compactOutput,
             rawOutput: commandContext.rawOutput,

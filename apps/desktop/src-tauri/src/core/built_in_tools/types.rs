@@ -14,6 +14,8 @@ pub struct BuiltInBashExecutionRequest {
     pub command: String,
     /// 可选工作目录。留空时沿用当前进程工作目录。
     pub working_directory: Option<String>,
+    #[serde(default)]
+    pub allowed_working_directories: Vec<String>,
     /// 可选超时，单位毫秒。
     pub timeout_ms: Option<u64>,
     /// 是否启用输出压缩：执行前自动为命令添加压缩前缀以精简输出。

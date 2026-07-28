@@ -97,6 +97,32 @@ async fn try_rtk_rewrite(command: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
+fn validate_working_directory(
+    working_directory: Option<&str>,
+    allowed_directories: &[String],
+) -> Result<(), String> {
+    let Some(working_directory) = working_directory else {
+        return Ok(());
+    };
+    if allowed_directories.is_empty() {
+        return Ok(());
+    }
+
+    let canonical_working_directory = std::fs::canonicalize(working_directory)
+        .map_err(|error| format!("Failed to resolve working directory: {error}"))?;
+    let is_allowed = allowed_directories.iter().any(|allowed_directory| {
+        std::fs::canonicalize(allowed_directory)
+            .map(|canonical_allowed| canonical_working_directory.starts_with(canonical_allowed))
+            .unwrap_or(false)
+    });
+    if is_allowed {
+        Ok(())
+    } else {
+        Err("Working directory is outside the allowed scope".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
 async fn execute_bash_windows(
     request: BuiltInBashExecutionRequest,
     registry: &BashExecutionRegistry,
@@ -117,6 +143,11 @@ async fn execute_bash_windows(
         } else {
             (trimmed_command.to_string(), false)
         };
+
+    validate_working_directory(
+        request.working_directory.as_deref(),
+        &request.allowed_working_directories,
+    )?;
 
     let timeout_ms = resolve_timeout_ms(request.timeout_ms, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
     let command_script = build_powershell_command_script(&effective_command);
@@ -255,5 +286,29 @@ fn build_powershell_command_script(command: &str) -> String {
         format!("{}\n{}", UTF8_POWERSHELL_PRELUDE, command)
     } else {
         format!("{}\n{}\n{}", UTF8_POWERSHELL_PRELUDE, path_prelude, command)
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::validate_working_directory;
+    use std::fs;
+
+    #[test]
+    fn rejects_canonical_working_directory_outside_allowlist() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let allowed = root.path().join("allowed");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&allowed).expect("allowed directory");
+        fs::create_dir_all(&outside).expect("outside directory");
+        let escaped = allowed.join("..").join("outside");
+
+        let error = validate_working_directory(
+            Some(escaped.to_string_lossy().as_ref()),
+            &[allowed.to_string_lossy().into_owned()],
+        )
+        .expect_err("escaped working directory must be rejected");
+
+        assert!(error.contains("outside the allowed scope"));
     }
 }

@@ -15,6 +15,7 @@ export interface BuiltInBashExecutionRequest {
     executionId: string;
     command: string;
     workingDirectory?: string | null;
+    allowedWorkingDirectories?: string[];
     timeoutMs?: number | null;
     compactOutput?: boolean;
     rawOutput?: boolean;
