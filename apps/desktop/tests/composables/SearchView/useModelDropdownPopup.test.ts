@@ -241,6 +241,40 @@ describe('useModelDropdownPopup', () => {
         expect(onPopupSessionEnd).toHaveBeenCalledTimes(1);
     });
 
+    it('closes a popup that finishes opening after the composable unmounts', async () => {
+        let resolveShow: ((popupId: string) => void) | undefined;
+        vi.mocked(popupManager.show).mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    resolveShow = resolve;
+                })
+        );
+        const onPopupSessionStart = vi.fn();
+        const mounted = await mountComposable(() =>
+            useModelDropdownPopup({
+                getAnchorElement: () => document.createElement('button'),
+                getPopupData: () => createPopupData(),
+                isModelDropdownActive: () => true,
+                onModelSelect: () => undefined,
+                onModelSearchQueryChange: () => undefined,
+                onClose: () => undefined,
+                onPopupSessionStart,
+            })
+        );
+
+        const opening = mounted.result.open();
+        mounted.unmount();
+        resolveShow?.('popup-model-dropdown-popup:1');
+        await opening;
+
+        expect(popupManager.hide).toHaveBeenCalledWith({
+            popupId: 'popup-model-dropdown-popup:1',
+            windowLabel: 'popup-model-dropdown-popup',
+            popupSessionVersion: expect.any(Number),
+        });
+        expect(onPopupSessionStart).not.toHaveBeenCalled();
+    });
+
     it('closes the active popup session with the current identity', async () => {
         const onPopupSessionEnd = vi.fn();
         const mounted = await mountComposable(() =>

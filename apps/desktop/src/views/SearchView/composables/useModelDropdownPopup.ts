@@ -90,6 +90,19 @@ export function useModelDropdownPopup(options: UseModelDropdownPopupOptions) {
                   popupSessionVersion: parsePopupSessionVersion(popupId),
               }
             : null;
+
+        if (disposed) {
+            if (identity) {
+                await popupManager.hide(identity).catch((error) => {
+                    console.error(
+                        '[SearchView] Failed to hide model dropdown popup on unmount:',
+                        error
+                    );
+                });
+            }
+            return;
+        }
+
         const isLivePopupSession = identity ? isLiveModelDropdownPopupSession(identity) : false;
 
         if (!identity || !isLivePopupSession) {
