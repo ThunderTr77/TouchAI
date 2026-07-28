@@ -346,6 +346,29 @@ describe('AppUpdateController', () => {
         expect(checked).toBe(false);
     });
 
+    it('invalidates a resolved check synchronously when changing channels', async () => {
+        const deferredCheck = createDeferred<AppUpdateCheckResult>();
+        const { controller, checkForUpdates } = createController();
+        checkForUpdates.mockReturnValueOnce(deferredCheck.promise);
+
+        await controller.initialize();
+        const checkPromise = controller.checkNow('manual');
+        await Promise.resolve();
+
+        deferredCheck.resolve({
+            status: 'available',
+            channel: 'stable',
+            currentVersion: '0.1.0',
+            latest: latestUpdate,
+            update: availableUpdate,
+            requirement: neutralRequirement,
+        });
+        const setChannelPromise = controller.setChannel('nightly');
+
+        await expect(checkPromise).resolves.toBe(false);
+        await setChannelPromise;
+    });
+
     it('restores the previous state when channel persistence fails', async () => {
         const deferredCheck = createDeferred<AppUpdateCheckResult>();
         const { controller, checkForUpdates, updateAppUpdateLastCheckedAt } = createController({
@@ -371,6 +394,21 @@ describe('AppUpdateController', () => {
         expect(controller.getState().channel).toBe('stable');
         await expect(checkPromise).resolves.toBe(false);
         expect(updateAppUpdateLastCheckedAt).not.toHaveBeenCalled();
+    });
+
+    it('initializes before snapshotting a channel transition', async () => {
+        const operationError = new Error('database unavailable');
+        const { controller } = createController({
+            channel: 'beta',
+            updateChannelError: operationError,
+        });
+
+        await expect(controller.setChannel('nightly')).rejects.toBe(operationError);
+
+        expect(controller.getState()).toMatchObject({
+            status: 'idle',
+            channel: 'beta',
+        });
     });
 
     it('rolls back the persisted channel when clearing the channel timestamp fails', async () => {
@@ -406,6 +444,93 @@ describe('AppUpdateController', () => {
         expect(updateAppUpdateChannel).toHaveBeenNthCalledWith(2, 'stable');
         expect(updateAppUpdateLastCheckedAt).toHaveBeenCalledOnce();
         expect(updateAppUpdateLastCheckedAt).toHaveBeenCalledWith(null);
+    });
+
+    it('reconciles state when a channel write rejects after mutation and compensation fails', async () => {
+        let persistedChannel: AppUpdateChannel = 'stable';
+        const operationError = new Error('settings broadcast failed');
+        const compensationError = new Error('compensation failed');
+        const updateAppUpdateChannel = vi
+            .fn<(channel: AppUpdateChannel) => Promise<void>>()
+            .mockImplementation(async (channel) => {
+                if (channel === 'nightly') {
+                    persistedChannel = channel;
+                    throw operationError;
+                }
+                throw compensationError;
+            });
+        const controller = new AppUpdateController({
+            native: {
+                checkForUpdates: vi.fn(),
+                downloadUpdate: vi.fn(),
+                installUpdate: vi.fn(),
+            },
+            settings: {
+                initialize: vi.fn().mockResolvedValue(undefined),
+                getChannel: () => persistedChannel,
+                getAutoCheckEnabled: () => true,
+                getLastCheckedAt: () => null,
+                updateAppUpdateChannel,
+                updateAppUpdateAutoCheck: vi.fn().mockResolvedValue(undefined),
+                updateAppUpdateLastCheckedAt: vi.fn().mockResolvedValue(undefined),
+            },
+        });
+
+        await controller.initialize();
+        await expect(controller.setChannel('nightly')).rejects.toBe(operationError);
+
+        expect(updateAppUpdateChannel).toHaveBeenNthCalledWith(1, 'nightly');
+        expect(updateAppUpdateChannel).toHaveBeenNthCalledWith(2, 'stable');
+        expect(persistedChannel).toBe('nightly');
+        expect(controller.getState()).toMatchObject({
+            status: 'idle',
+            channel: persistedChannel,
+        });
+    });
+
+    it('does not let an older failed channel transition undo a newer selection', async () => {
+        let persistedChannel: AppUpdateChannel = 'stable';
+        const olderUpdate = createDeferred<void>();
+        const olderError = new Error('older transition failed');
+        const updateAppUpdateChannel = vi
+            .fn<(channel: AppUpdateChannel) => Promise<void>>()
+            .mockImplementation(async (channel) => {
+                if (channel === 'beta') {
+                    await olderUpdate.promise;
+                }
+                persistedChannel = channel;
+            });
+        const controller = new AppUpdateController({
+            native: {
+                checkForUpdates: vi.fn(),
+                downloadUpdate: vi.fn(),
+                installUpdate: vi.fn(),
+            },
+            settings: {
+                initialize: vi.fn().mockResolvedValue(undefined),
+                getChannel: () => persistedChannel,
+                getAutoCheckEnabled: () => true,
+                getLastCheckedAt: () => null,
+                updateAppUpdateChannel,
+                updateAppUpdateAutoCheck: vi.fn().mockResolvedValue(undefined),
+                updateAppUpdateLastCheckedAt: vi.fn().mockResolvedValue(undefined),
+            },
+        });
+
+        await controller.initialize();
+        const olderTransition = controller.setChannel('beta');
+        await Promise.resolve();
+        const newerTransition = controller.setChannel('nightly');
+
+        olderUpdate.reject(olderError);
+
+        await expect(olderTransition).rejects.toBe(olderError);
+        await expect(newerTransition).resolves.toBeUndefined();
+        expect(updateAppUpdateChannel).toHaveBeenNthCalledWith(1, 'beta');
+        expect(updateAppUpdateChannel).toHaveBeenNthCalledWith(2, 'stable');
+        expect(updateAppUpdateChannel).toHaveBeenNthCalledWith(3, 'nightly');
+        expect(persistedChannel).toBe('nightly');
+        expect(controller.getState().channel).toBe('nightly');
     });
 
     it('ignores an older check result when a newer same-channel check finishes first', async () => {

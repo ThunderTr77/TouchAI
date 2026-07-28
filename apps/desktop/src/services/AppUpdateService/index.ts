@@ -57,6 +57,7 @@ export class AppUpdateController {
     private initialized = false;
     private unlistenProgress: UnlistenFn | null = null;
     private checkRequestVersion = 0;
+    private channelTransitionQueue: Promise<void> = Promise.resolve();
 
     constructor(deps: AppUpdateControllerDeps) {
         this.native = deps.native;
@@ -110,27 +111,52 @@ export class AppUpdateController {
         }
     }
 
-    async setChannel(channel: AppUpdateChannel): Promise<void> {
-        await this.initialize();
-        const previousChannel = this.state.channel;
+    setChannel(channel: AppUpdateChannel): Promise<void> {
+        if (this.initialized) {
+            return this.queueChannelTransition(channel);
+        }
+
+        return this.initialize().then(() => this.queueChannelTransition(channel));
+    }
+
+    private queueChannelTransition(channel: AppUpdateChannel): Promise<void> {
+        this.invalidateChecksForChannelTransition();
+        const transition = this.channelTransitionQueue.then(() =>
+            this.runChannelTransition(channel)
+        );
+        this.channelTransitionQueue = transition.catch(() => undefined);
+        return transition;
+    }
+
+    private async runChannelTransition(channel: AppUpdateChannel): Promise<void> {
+        const restoreState = this.invalidateChecksForChannelTransition();
+        const previousChannel = restoreState.channel;
+
+        try {
+            await this.settings.updateAppUpdateChannel(channel);
+            await this.settings.updateAppUpdateLastCheckedAt(null);
+            this.commit({ type: 'channel-updated', channel });
+        } catch (error) {
+            await this.settings.updateAppUpdateChannel(previousChannel).catch(() => undefined);
+            const persistedChannel = this.settings.getChannel();
+            this.replaceState(
+                persistedChannel === previousChannel
+                    ? restoreState
+                    : reduceAppUpdateState(restoreState, {
+                          type: 'channel-updated',
+                          channel: persistedChannel,
+                      })
+            );
+            throw error;
+        }
+    }
+
+    private invalidateChecksForChannelTransition(): AppUpdateState {
         const restoreState: AppUpdateState =
             this.state.status === 'checking' ? { ...this.state, status: 'idle' } : this.state;
         this.checkRequestVersion += 1;
         this.replaceState(restoreState);
-
-        let channelPersisted = false;
-        try {
-            await this.settings.updateAppUpdateChannel(channel);
-            channelPersisted = true;
-            await this.settings.updateAppUpdateLastCheckedAt(null);
-            this.commit({ type: 'channel-updated', channel });
-        } catch (error) {
-            if (channelPersisted) {
-                await this.settings.updateAppUpdateChannel(previousChannel).catch(() => undefined);
-            }
-            this.replaceState(restoreState);
-            throw error;
-        }
+        return restoreState;
     }
 
     async checkNow(source: AppUpdateCheckSource = 'manual'): Promise<boolean> {
