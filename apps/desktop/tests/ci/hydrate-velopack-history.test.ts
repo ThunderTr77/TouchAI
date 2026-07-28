@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -137,6 +137,108 @@ describe('hydrateVelopackHistory', () => {
                 expect.stringContaining(encodeURIComponent(unsafeFileName)),
                 expect.anything()
             );
+        } finally {
+            globalThis.fetch = originalFetch;
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('rejects Windows-unsafe package file names without fetching, writing, or retaining them', async () => {
+        const hydrateVelopackHistory = await loadHydrator();
+        const product = productWithNightlyRetention(1);
+        const root = await createFixture(product);
+        const releaseDir = join(root, 'release');
+        const feedName = 'releases.nightly.json';
+        const feedUrl = `${product.services.updates.baseUrl}/${feedName}`;
+        const version = '0.3.0-nightly.20260523.3';
+        const safeFileNames = [
+            `TouchAI-nightly-${version}-windows-full.nupkg`,
+            'trailing-dot..nupkg',
+            'CONSOLE.nupkg',
+            'COM10.nupkg',
+        ];
+        const unsafeFileNames = [
+            '../escape.nupkg',
+            '..\\escape.nupkg',
+            ' C.nupkg',
+            'C.nupkg ',
+            'bad\u0000name.nupkg',
+            'bad\u001fname.nupkg',
+            'bad<name.nupkg',
+            'bad>name.nupkg',
+            'bad:name.nupkg',
+            'bad"name.nupkg',
+            'bad|name.nupkg',
+            'bad?.nupkg',
+            'bad*.nupkg',
+            'trailing-dot.nupkg.',
+            'trailing-space.nupkg ',
+            'CON.nupkg',
+            'prn.NUPKG',
+            'AUX.nupkg',
+            'nul.nupkg',
+            'COM1.nupkg',
+            'com9.nupkg',
+            'LPT1.nupkg',
+            'lpt9.nupkg',
+            'CON.backup.nupkg',
+            'COM1.release.nupkg',
+        ];
+        const feed = {
+            Assets: [...safeFileNames, ...unsafeFileNames].map((fileName) => ({
+                PackageId: product.identifier,
+                Version: version,
+                Type: 'Full',
+                FileName: fileName,
+            })),
+        };
+        const fetchMock = vi.fn<typeof fetch>(async (input) => {
+            const url = input.toString();
+
+            if (url === feedUrl) {
+                return new Response(JSON.stringify(feed), {
+                    headers: { 'content-type': 'application/json' },
+                });
+            }
+
+            if (new URL(url).hostname === 'api.github.com') {
+                return new Response(
+                    JSON.stringify([release(`v${version}`, '2026-05-23T00:00:00Z')]),
+                    { headers: { 'content-type': 'application/json' } }
+                );
+            }
+
+            if (
+                safeFileNames.some((fileName) => url.endsWith(`/${encodeURIComponent(fileName)}`))
+            ) {
+                return new Response('safe package');
+            }
+
+            return new Response(null, { status: 404 });
+        });
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+        try {
+            await mkdir(releaseDir, { recursive: true });
+            expect(hydrateVelopackHistory).toBeTypeOf('function');
+            await expect(
+                hydrateVelopackHistory?.(root, releaseDir, 'nightly')
+            ).resolves.toBeUndefined();
+
+            const hydratedFeed = JSON.parse(await readFile(join(releaseDir, feedName), 'utf8'));
+            expect(
+                hydratedFeed.Assets.map((asset: { FileName: string }) => asset.FileName)
+            ).toEqual(safeFileNames);
+            const releaseFiles = await readdir(releaseDir);
+            expect(releaseFiles).toHaveLength(safeFileNames.length + 1);
+            expect(releaseFiles).toEqual(expect.arrayContaining([feedName, ...safeFileNames]));
+            for (const unsafeFileName of unsafeFileNames) {
+                expect(fetchMock).not.toHaveBeenCalledWith(
+                    expect.stringContaining(encodeURIComponent(unsafeFileName)),
+                    expect.anything()
+                );
+            }
         } finally {
             globalThis.fetch = originalFetch;
             await rm(root, { recursive: true, force: true });

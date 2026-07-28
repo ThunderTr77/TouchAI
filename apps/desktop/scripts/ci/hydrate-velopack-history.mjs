@@ -165,14 +165,19 @@ function updateAssetUrl(product, fileName) {
 }
 
 function isSafeAssetFileName(fileName) {
-    return (
-        typeof fileName === 'string' &&
-        fileName.trim() === fileName &&
-        fileName.length > 0 &&
-        !/[\\/]/u.test(fileName) &&
-        fileName !== '.' &&
-        fileName !== '..'
-    );
+    if (
+        typeof fileName !== 'string' ||
+        fileName.length === 0 ||
+        fileName.trim() !== fileName ||
+        // eslint-disable-next-line no-control-regex -- Asset names must reject ASCII control characters.
+        /[<>:"/\\|?*\u0000-\u001f]/u.test(fileName) ||
+        /[. ]$/u.test(fileName)
+    ) {
+        return false;
+    }
+
+    const stem = fileName.split('.')[0]?.toUpperCase();
+    return !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(stem ?? '');
 }
 
 function isVelopackPackage(asset) {
