@@ -177,7 +177,7 @@ function isSafeAssetFileName(fileName) {
     }
 
     const stem = fileName.split('.')[0]?.toUpperCase();
-    return !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(stem ?? '');
+    return !/^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$/u.test(stem ?? '');
 }
 
 function isVelopackPackage(asset) {
