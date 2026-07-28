@@ -132,6 +132,11 @@ async fn execute_bash_windows(
         return Err("Command cannot be empty".to_string());
     }
 
+    validate_working_directory(
+        request.working_directory.as_deref(),
+        &request.allowed_working_directories,
+    )?;
+
     // 当输出压缩启用且模型未请求原始输出时，通过 rtk rewrite 判断命令是否可重写，
     // 支持的命令自动替换为 rtk 等价形式，不支持的原样执行。
     let (effective_command, compressed) =
@@ -143,11 +148,6 @@ async fn execute_bash_windows(
         } else {
             (trimmed_command.to_string(), false)
         };
-
-    validate_working_directory(
-        request.working_directory.as_deref(),
-        &request.allowed_working_directories,
-    )?;
 
     let timeout_ms = resolve_timeout_ms(request.timeout_ms, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
     let command_script = build_powershell_command_script(&effective_command);
