@@ -112,10 +112,25 @@ export class AppUpdateController {
 
     async setChannel(channel: AppUpdateChannel): Promise<void> {
         await this.initialize();
-        await this.settings.updateAppUpdateChannel(channel);
-        await this.settings.updateAppUpdateLastCheckedAt(null);
+        const previousChannel = this.state.channel;
+        const restoreState: AppUpdateState =
+            this.state.status === 'checking' ? { ...this.state, status: 'idle' } : this.state;
         this.checkRequestVersion += 1;
-        this.commit({ type: 'channel-updated', channel });
+        this.replaceState(restoreState);
+
+        let channelPersisted = false;
+        try {
+            await this.settings.updateAppUpdateChannel(channel);
+            channelPersisted = true;
+            await this.settings.updateAppUpdateLastCheckedAt(null);
+            this.commit({ type: 'channel-updated', channel });
+        } catch (error) {
+            if (channelPersisted) {
+                await this.settings.updateAppUpdateChannel(previousChannel).catch(() => undefined);
+            }
+            this.replaceState(restoreState);
+            throw error;
+        }
     }
 
     async checkNow(source: AppUpdateCheckSource = 'manual'): Promise<boolean> {

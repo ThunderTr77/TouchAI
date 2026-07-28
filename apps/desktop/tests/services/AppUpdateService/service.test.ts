@@ -317,7 +317,36 @@ describe('AppUpdateController', () => {
         expect(updateAppUpdateLastCheckedAt).toHaveBeenCalledWith(null);
     });
 
-    it('keeps in-flight checks current when channel persistence fails', async () => {
+    it('invalidates in-flight checks before channel persistence completes', async () => {
+        const deferredCheck = createDeferred<AppUpdateCheckResult>();
+        const deferredChannelUpdate = createDeferred<void>();
+        const { controller, checkForUpdates, updateAppUpdateChannel } = createController();
+        checkForUpdates.mockReturnValueOnce(deferredCheck.promise);
+        updateAppUpdateChannel.mockReturnValueOnce(deferredChannelUpdate.promise);
+
+        await controller.initialize();
+        const checkPromise = controller.checkNow('manual');
+        await Promise.resolve();
+        const setChannelPromise = controller.setChannel('nightly');
+        await Promise.resolve();
+
+        deferredCheck.resolve({
+            status: 'available',
+            channel: 'stable',
+            currentVersion: '0.1.0',
+            latest: latestUpdate,
+            update: availableUpdate,
+            requirement: neutralRequirement,
+        });
+        const checked = await checkPromise;
+
+        deferredChannelUpdate.resolve();
+        await setChannelPromise;
+
+        expect(checked).toBe(false);
+    });
+
+    it('restores the previous state when channel persistence fails', async () => {
         const deferredCheck = createDeferred<AppUpdateCheckResult>();
         const { controller, checkForUpdates, updateAppUpdateLastCheckedAt } = createController({
             updateChannelError: new Error('database unavailable'),
@@ -338,18 +367,13 @@ describe('AppUpdateController', () => {
             requirement: neutralRequirement,
         });
 
-        await expect(checkPromise).resolves.toBe(true);
-        expect(controller.getState()).toMatchObject({
-            status: 'available',
-            channel: 'stable',
-            availableUpdate,
-            lastCheckedAt: '2026-05-22T10:00:00.000Z',
-        });
-        expect(updateAppUpdateLastCheckedAt).toHaveBeenCalledTimes(1);
-        expect(updateAppUpdateLastCheckedAt).toHaveBeenCalledWith('2026-05-22T10:00:00.000Z');
+        expect(controller.getState().status).not.toBe('checking');
+        expect(controller.getState().channel).toBe('stable');
+        await expect(checkPromise).resolves.toBe(false);
+        expect(updateAppUpdateLastCheckedAt).not.toHaveBeenCalled();
     });
 
-    it('keeps in-flight checks current when clearing the channel timestamp fails', async () => {
+    it('rolls back the persisted channel when clearing the channel timestamp fails', async () => {
         const deferredCheck = createDeferred<AppUpdateCheckResult>();
         const {
             controller,
@@ -375,16 +399,13 @@ describe('AppUpdateController', () => {
             requirement: neutralRequirement,
         });
 
-        await expect(checkPromise).resolves.toBe(true);
-        expect(controller.getState()).toMatchObject({
-            status: 'available',
-            channel: 'stable',
-            availableUpdate,
-            lastCheckedAt: '2026-05-22T10:00:00.000Z',
-        });
-        expect(updateAppUpdateChannel).toHaveBeenCalledWith('nightly');
-        expect(updateAppUpdateLastCheckedAt).toHaveBeenNthCalledWith(1, null);
-        expect(updateAppUpdateLastCheckedAt).toHaveBeenNthCalledWith(2, '2026-05-22T10:00:00.000Z');
+        expect(controller.getState().status).not.toBe('checking');
+        expect(controller.getState().channel).toBe('stable');
+        await expect(checkPromise).resolves.toBe(false);
+        expect(updateAppUpdateChannel).toHaveBeenNthCalledWith(1, 'nightly');
+        expect(updateAppUpdateChannel).toHaveBeenNthCalledWith(2, 'stable');
+        expect(updateAppUpdateLastCheckedAt).toHaveBeenCalledOnce();
+        expect(updateAppUpdateLastCheckedAt).toHaveBeenCalledWith(null);
     });
 
     it('ignores an older check result when a newer same-channel check finishes first', async () => {
