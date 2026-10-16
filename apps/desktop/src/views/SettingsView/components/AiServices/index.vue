@@ -1,4 +1,4 @@
-﻿<!--
+<!--
   - Copyright (c) 2025-2026. Qian Cheng. Licensed under GPL v3
   -->
 
@@ -24,7 +24,7 @@
         updateModel,
         updateProvider,
     } from '@database/queries';
-    import { isLlmMetadataEmpty } from '@database/queries/llmMetadata.ts';
+    import { isLlmMetadataAliasEmpty, isLlmMetadataEmpty } from '@database/queries/llmMetadata.ts';
     import type { ModelWithProvider } from '@database/queries/models.ts';
     import type { Model, NewModel, NewProvider, Provider } from '@database/schema.ts';
     import { AppEvent, eventService } from '@services/EventService';
@@ -32,7 +32,7 @@
 
     import { locale, t } from '@/i18n';
     import { aiService } from '@/services/AgentService';
-    import { updateModelMetadata } from '@/services/AgentService/infrastructure/modelMetadata';
+    import { refreshModelMetadataIfStale } from '@/services/AgentService/infrastructure/modelMetadata';
     import { getProviderDriverDefinition } from '@/services/AgentService/infrastructure/providers';
 
     defineOptions({
@@ -619,6 +619,9 @@
                     name: fetchedModel.name,
                     model_id: fetchedModel.id,
                     is_default: 0,
+                    reasoning_options: fetchedModel.reasoningOptions?.length
+                        ? JSON.stringify(fetchedModel.reasoningOptions)
+                        : null,
                 }));
 
             // 避免展示错误
@@ -662,13 +665,15 @@
     };
 
     onMounted(async () => {
-        // 检查 llm-metadata 是否为空，如果为空则自动获取
+        // 启动流程已经落过本地元数据，这里只做兜底检查与按需刷新。
         try {
-            const isEmpty = await isLlmMetadataEmpty();
-            if (isEmpty) {
-                console.log('[AiServicesView] llm-metadata is empty, fetching...');
-                await updateModelMetadata();
-                console.log('[AiServicesView] llm-metadata fetched successfully');
+            const isEmpty = (await isLlmMetadataEmpty()) || (await isLlmMetadataAliasEmpty());
+            const result = await refreshModelMetadataIfStale();
+
+            if (result.status === 'updated') {
+                console.log('[AiServicesView] llm-metadata updated from remote');
+            } else if (isEmpty) {
+                console.warn('[AiServicesView] llm-metadata is still empty');
             }
         } catch (error) {
             console.error('[AiServicesView] Failed to check or update llm-metadata:', error);

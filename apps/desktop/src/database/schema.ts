@@ -24,6 +24,8 @@ export type ToolLogKind = 'mcp' | 'builtin';
  */
 export enum StatisticKey {
     MODEL_METADATA_LAST_UPDATED_AT = 'model_metadata_last_updated_at',
+    MODEL_METADATA_LAST_CHECKED_AT = 'model_metadata_last_checked_at',
+    MODEL_METADATA_SOURCE_ETAG = 'model_metadata_source_etag',
 }
 
 /**
@@ -298,6 +300,7 @@ export const models = sqliteTable('models', {
     modalities: text('modalities'), // JSON string: {input: [], output: []}
     open_weights: integer('open_weights').notNull().default(0),
     reasoning: integer('reasoning').notNull().default(0),
+    reasoning_options: text('reasoning_options'), // JSON string: ReasoningOption[]
     release_date: text('release_date'),
     temperature: integer('temperature').notNull().default(1),
     tool_call: integer('tool_call').notNull().default(0),
@@ -407,6 +410,7 @@ export const llmMetadata = sqliteTable('llm_metadata', {
     modalities: text('modalities').notNull(), // JSON string
     open_weights: integer('open_weights').notNull().default(0),
     reasoning: integer('reasoning').notNull().default(0),
+    reasoning_options: text('reasoning_options'), // JSON string: ReasoningOption[]
     release_date: text('release_date'),
     temperature: integer('temperature').notNull().default(1),
     tool_call: integer('tool_call').notNull().default(0),
@@ -418,6 +422,17 @@ export const llmMetadata = sqliteTable('llm_metadata', {
     updated_at: text('updated_at')
         .notNull()
         .default(sql`(datetime('now'))`),
+});
+
+/**
+ * LLM 元数据别名表
+ *
+ * 中转站等上游对同一模型存在多种写法（前缀、日期、-thinking 等），
+ * 这里维护别名到元数据模型的映射，供运行时同步做精确匹配。
+ */
+export const llmMetadataAliases = sqliteTable('llm_metadata_aliases', {
+    alias: text('alias').primaryKey(),
+    model_id: text('model_id').notNull(),
 });
 
 /**
@@ -570,6 +585,9 @@ export type SessionTurnAttemptUpdate = Partial<NewSessionTurnAttempt>;
 export type LlmMetadata = typeof llmMetadata.$inferSelect;
 export type NewLlmMetadata = typeof llmMetadata.$inferInsert;
 export type LlmMetadataUpdate = Partial<NewLlmMetadata>;
+
+export type LlmMetadataAlias = typeof llmMetadataAliases.$inferSelect;
+export type NewLlmMetadataAlias = typeof llmMetadataAliases.$inferInsert;
 
 export type McpServer = typeof mcpServers.$inferSelect;
 export type NewMcpServer = typeof mcpServers.$inferInsert;

@@ -5,6 +5,14 @@ import { type FinishReason, type LanguageModel, streamText } from 'ai';
 
 import { AiError, AiErrorCode } from '../../../contracts/errors';
 import type { AiRequestOptions, AiResponse, JsonObject } from '../../../contracts/protocol';
+import {
+    DEFAULT_REASONING_LEVEL,
+    deriveReasoningLevelMap,
+    type ReasoningLevelMap,
+    type ReasoningProtocol,
+    type SelectableReasoningLevel,
+} from '../../../contracts/reasoning';
+import { encodeReasoning, type ReasoningEncodingHints, resolveReasoning } from '../reasoning';
 import type {
     AiProvider,
     AiProviderConfig,
@@ -14,6 +22,7 @@ import type {
 } from '../types';
 import type { ProviderAttachmentRequestContext } from './attachments';
 import { buildModelMessages, buildToolSet } from './messages';
+import { normalizeResponsesReasoningStream } from './responsesStream';
 import { createAiSdkStreamProcessor } from './stream';
 import { createTauriFetch } from './tauriFetch';
 
@@ -228,7 +237,7 @@ export abstract class AiSdkProviderBase implements AiProvider {
     }
 
     async *stream(options: AiRequestOptions) {
-        const processor = createAiSdkStreamProcessor();
+        const processor = createAiSdkStreamProcessor({ modelId: options.model });
         const attachmentContext: ProviderAttachmentRequestContext = {
             driver: this.driver,
             providerId: options.providerId,
@@ -335,6 +344,7 @@ export abstract class AiSdkProviderBase implements AiProvider {
     protected createProviderFetch(): typeof fetch {
         const tauriFetch = createTauriFetch();
         const queryParams = this.config.queryParams ?? {};
+        const normalizeResponsesReasoning = this.shouldNormalizeResponsesReasoning();
 
         return (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
             const rawUrl =
@@ -344,7 +354,10 @@ export abstract class AiSdkProviderBase implements AiProvider {
                       ? input.toString()
                       : input.url;
             const requestUrl = buildUrlWithQueryParams(rawUrl, queryParams);
-            return tauriFetch(requestUrl, init);
+            const response = await tauriFetch(requestUrl, init);
+            return normalizeResponsesReasoning
+                ? normalizeResponsesReasoningStream(response)
+                : response;
         }) as typeof fetch;
     }
 
@@ -374,19 +387,129 @@ export abstract class AiSdkProviderBase implements AiProvider {
 
     /**
      * 允许 provider 在单次请求级别注入 AI SDK providerOptions。
+     *
+     * 请求层只传 TouchAI 统一档位与 capability；这里交给 resolver + format
+     * 编码成具体供应商参数。没有 metadata 时按 provider config 的 mode 走 fallback。
      */
     protected getStreamProviderOptions(
         options: AiRequestOptions
     ): Record<string, JsonObject> | undefined {
-        void options;
+        const format = this.config.reasoning?.format ?? this.getReasoningProtocol();
+        if (!format) {
+            return undefined;
+        }
+
+        const mode = this.config.reasoning?.mode ?? 'auto';
+        const hasTools = (options.tools?.length ?? 0) > 0;
+        const map =
+            options.reasoningOptions && options.reasoningOptions.length > 0
+                ? deriveReasoningLevelMap(options.reasoningOptions)
+                : this.getFallbackReasoningLevelMap(options.model);
+        const requested = this.applyReasoningConstraint(
+            options.reasoningLevel ?? DEFAULT_REASONING_LEVEL,
+            { modelId: options.model, hasTools }
+        );
+
+        const resolution = resolveReasoning({
+            level: requested,
+            map,
+            format,
+            mode,
+            modelId: options.model,
+            hasTools,
+        });
+        const encoded = encodeReasoning(resolution, this.getReasoningEncodingHints());
+        const providerOptions = this.remapReasoningProviderOptions(encoded.providerOptions);
+
+        console.debug(
+            `[reasoning] outbound model=${resolution.modelId} format=${resolution.format} mode=${resolution.mode} source=${resolution.source} requested=${resolution.requested} level=${resolution.level} mapped=${resolution.mapped ?? '-'} hasTools=${hasTools} providerOptions=${JSON.stringify(providerOptions ?? {})}`
+        );
+
+        return providerOptions;
+    }
+
+    /**
+     * 某些 SDK 的 providerOptions namespace 与协议默认 namespace 不同，例如 xAI 使用
+     * `xai`、MiMo 使用 `mimo`。协议仍按语义编码，driver 只负责声明最终 namespace。
+     */
+    protected getReasoningProviderOptionsKey(): string | undefined {
         return undefined;
     }
 
+    private remapReasoningProviderOptions(
+        providerOptions: Record<string, JsonObject> | undefined
+    ): Record<string, JsonObject> | undefined {
+        const key = this.getReasoningProviderOptionsKey();
+        if (!key || !providerOptions) {
+            return providerOptions;
+        }
+
+        const entries = Object.entries(providerOptions);
+        if (entries.length === 0) {
+            return providerOptions;
+        }
+
+        const merged: JsonObject = {};
+        for (const [, value] of entries) {
+            Object.assign(merged, value);
+        }
+        return { [key]: merged };
+    }
+
+    /**
+     * Provider driver 的默认编码格式；未声明时不发送 reasoning 参数。
+     */
+    protected getReasoningProtocol(): ReasoningProtocol | undefined {
+        return undefined;
+    }
+
+    /**
+     * Provider driver 的编码兼容开关。
+     */
+    protected getReasoningEncodingHints(): ReasoningEncodingHints | undefined {
+        return undefined;
+    }
+
+    /**
+     * metadata 缺失时的兜底档位映射（例如 OpenAI 官方硬编码模型表）。
+     */
+    protected getFallbackReasoningLevelMap(modelId: string): ReasoningLevelMap {
+        void modelId;
+        return {};
+    }
+
+    /**
+     * 模型级约束，例如某些模型在 Chat Completions 带 tools 时只能关闭思考。
+     */
+    protected applyReasoningConstraint(
+        level: SelectableReasoningLevel,
+        context: { modelId: string; hasTools: boolean }
+    ): SelectableReasoningLevel {
+        void context;
+        return level;
+    }
     /**
      * 仅在需要 provider 原始 chunk 做协议修补时开启 raw chunks，避免其余 provider 产生额外流噪音。
      */
     protected shouldIncludeRawChunks(): boolean {
         return false;
+    }
+
+    /**
+     * 当前生效的 reasoning 编码格式：provider config 优先，其次 driver 默认。
+     */
+    protected getEffectiveReasoningFormat(): ReasoningProtocol | undefined {
+        return this.config.reasoning?.format ?? this.getReasoningProtocol();
+    }
+
+    /**
+     * 是否把 Responses 事件流里的非标准推理事件归一化。
+     *
+     * 走 Responses 协议时开启：官方 API 用 `summary` 暴露思考，部分中转站改用
+     * `reasoning_text`，SDK 只认前者，归一化后两者都能显示。
+     */
+    protected shouldNormalizeResponsesReasoning(): boolean {
+        return this.getEffectiveReasoningFormat() === 'openai-responses';
     }
 
     protected abstract createLanguageModel(modelId: string): LanguageModel;

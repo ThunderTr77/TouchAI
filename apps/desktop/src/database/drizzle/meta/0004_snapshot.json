@@ -352,6 +352,13 @@
           "autoincrement": false,
           "default": 0
         },
+        "reasoning_options": {
+          "name": "reasoning_options",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "release_date": {
           "name": "release_date",
           "type": "text",
@@ -415,6 +422,30 @@
           "isUnique": true
         }
       },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "llm_metadata_aliases": {
+      "name": "llm_metadata_aliases",
+      "columns": {
+        "alias": {
+          "name": "alias",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "model_id": {
+          "name": "model_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -950,6 +981,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": 0
+        },
+        "reasoning_options": {
+          "name": "reasoning_options",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "release_date": {
           "name": "release_date",
