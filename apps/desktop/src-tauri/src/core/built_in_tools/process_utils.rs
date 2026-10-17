@@ -2,26 +2,58 @@
 
 //! 内置工具共享的进程管理辅助函数。
 
-use tokio::io::AsyncReadExt;
+use encoding_rs::UTF_8;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Child;
 
-/// 读取完整的 stdout/stderr 流。
-///
-/// 先做宽松 UTF-8 解码再 trim，对工具日志来说"尽可能保留可读内容"比"遇到坏字节直接失败"更重要。
-pub async fn read_stream<R>(mut reader: R) -> Result<String, String>
+/// Incrementally reads a process stream, reporting decoded UTF-8 chunks as they arrive.
+pub async fn read_stream_with_progress<R, F>(
+    mut reader: R,
+    mut on_chunk: F,
+) -> Result<String, String>
 where
-    R: tokio::io::AsyncRead + Unpin,
+    R: AsyncRead + Unpin,
+    F: FnMut(&str) -> Result<(), String>,
 {
-    let mut buffer = Vec::new();
-    reader
-        .read_to_end(&mut buffer)
-        .await
-        .map_err(|error| format!("Failed to read process stream: {error}"))?;
+    let mut decoder = UTF_8.new_decoder_without_bom_handling();
+    let mut buffer = [0u8; 4096];
+    let mut output = String::new();
 
-    Ok(String::from_utf8_lossy(&buffer).trim().to_string())
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("Failed to read process stream: {error}"))?;
+        let is_last = read == 0;
+        let bytes = if is_last { &[][..] } else { &buffer[..read] };
+        // 缓冲区必须按解码器给出的最坏情况上界预留：容量不足时
+        // `decode_to_string` 会返回 `OutputFull` 并保留未消费的输入，
+        // 而被丢弃的字节会破坏跨读取边界的多字节 UTF-8 序列。
+        let capacity = decoder
+            .max_utf8_buffer_length(bytes.len())
+            .unwrap_or_else(|| bytes.len().saturating_mul(3).saturating_add(4));
+        let mut decoded = String::with_capacity(capacity.max(4));
+
+        let (result, consumed, _) = decoder.decode_to_string(bytes, &mut decoded, is_last);
+        debug_assert!(
+            matches!(result, encoding_rs::CoderResult::InputEmpty),
+            "UTF-8 解码必须在预留容量内消费全部输入"
+        );
+        debug_assert_eq!(consumed, bytes.len(), "解码必须消费本次读取的全部字节");
+        if !decoded.is_empty() {
+            output.push_str(&decoded);
+            on_chunk(&decoded)?;
+        }
+
+        if is_last {
+            break;
+        }
+    }
+
+    Ok(output.trim().to_string())
 }
 
-/// 统一组合 stdout/stderr，方便上层日志和工具结果直接使用。
+/// Combines stdout/stderr into the single tool result format used by the upper layers.
 pub fn combine_output(stdout: &str, stderr: &str) -> String {
     match (stdout.is_empty(), stderr.is_empty()) {
         (false, false) => format!("STDOUT:\n{}\n\nSTDERR:\n{}", stdout, stderr),
@@ -44,10 +76,7 @@ pub fn resolve_timeout_ms(timeout_ms: Option<u64>, default_ms: u64, max_ms: u64)
     }
 }
 
-/// 终止子进程并等待回收。
-///
-/// Windows 上优先使用 `taskkill /T /F` 杀整棵进程树，
-/// 避免只终止父进程后其派生的子进程成为孤儿。
+/// Terminates a child process and waits for it to exit.
 pub async fn terminate_child(
     child: &mut Child,
     label: &str,
@@ -176,5 +205,48 @@ mod tests {
     #[test]
     fn resolve_timeout_ms_treats_zero_as_disabled() {
         assert_eq!(resolve_timeout_ms(Some(0), 120000, 120000), None);
+    }
+
+    /// 逐字节到达的多字节 UTF-8 序列不能被解码缓冲区容量截断。
+    #[tokio::test]
+    async fn read_stream_with_progress_decodes_multibyte_reads_across_chunks() {
+        struct OneByteAtATime {
+            bytes: Vec<u8>,
+            offset: usize,
+        }
+
+        impl tokio::io::AsyncRead for OneByteAtATime {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                if self.offset >= self.bytes.len() {
+                    return std::task::Poll::Ready(Ok(()));
+                }
+
+                let byte = self.bytes[self.offset];
+                self.offset += 1;
+                buf.put_slice(&[byte]);
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        let text = "多字节🙂收尾";
+        let reader = OneByteAtATime {
+            bytes: text.as_bytes().to_vec(),
+            offset: 0,
+        };
+        let mut chunks = Vec::new();
+
+        let output = read_stream_with_progress(reader, |chunk| {
+            chunks.push(chunk.to_string());
+            Ok(())
+        })
+        .await
+        .expect("byte-at-a-time decoding should succeed");
+
+        assert_eq!(output, text);
+        assert_eq!(chunks.concat(), text);
     }
 }
