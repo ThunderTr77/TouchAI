@@ -651,6 +651,7 @@ const zhCNMessages = {
     'settings.builtInTools.bash.removeDirectory': '移除目录',
     'settings.builtInTools.bash.allowAllDirectoriesWhenEmpty': '未设置时运行时允许全部路径',
     'settings.builtInTools.bash.timeoutMs': '超时上限（毫秒）',
+    'settings.builtInTools.bash.timeoutMsHint': '超过该时长的命令会被终止；填 0 表示不限制。',
     'settings.builtInTools.bash.outputLimitChars': '输出上限（字符）',
     'settings.builtInTools.bash.compactOutput': '压缩命令输出',
     'settings.builtInTools.bash.compactOutputDescription':
@@ -895,6 +896,8 @@ const zhCNMessages = {
     'builtInTools.logs.approvalState.rejected': '已拒绝',
     'agent.mcp.requestCancelled': '请求已取消',
     'agent.mcp.toolTimeout': '工具执行超时（{timeoutMs}ms）',
+    'agent.mcp.invalidToolTimeout':
+        '服务器工具超时配置无效（{timeoutMs}ms），请在服务器设置中修改后重试。',
     'agent.mcp.toolNotFound': '未找到工具：{toolName}',
     'agent.mcp.disconnectTimeout': '断开超时',
     'agent.mcp.imageResult': '[图片：{mimeType}]',
@@ -1674,6 +1677,8 @@ const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
     'settings.builtInTools.bash.allowAllDirectoriesWhenEmpty':
         'Allows all paths at runtime when unset',
     'settings.builtInTools.bash.timeoutMs': 'Timeout limit (ms)',
+    'settings.builtInTools.bash.timeoutMsHint':
+        'Commands running longer than this are terminated; set 0 to disable the limit.',
     'settings.builtInTools.bash.outputLimitChars': 'Output limit (characters)',
     'settings.builtInTools.bash.compactOutput': 'Compact command output',
     'settings.builtInTools.bash.compactOutputDescription':
@@ -1931,6 +1936,8 @@ const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
     'builtInTools.logs.approvalState.rejected': 'Rejected',
     'agent.mcp.requestCancelled': 'Request cancelled',
     'agent.mcp.toolTimeout': 'Tool execution timed out ({timeoutMs}ms)',
+    'agent.mcp.invalidToolTimeout':
+        'Invalid tool timeout configured on the server ({timeoutMs}ms). Update it in the server settings and retry.',
     'agent.mcp.toolNotFound': 'Tool not found: {toolName}',
     'agent.mcp.disconnectTimeout': 'Disconnect timeout',
     'agent.mcp.imageResult': '[Image: {mimeType}]',

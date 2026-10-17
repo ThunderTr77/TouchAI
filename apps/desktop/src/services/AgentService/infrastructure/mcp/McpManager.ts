@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026. Qian Cheng. Licensed under GPL v3.
+// Copyright (c) 2026. Qian Cheng. Licensed under GPL v3.
 
 /**
  * MCP Manager - 管理 MCP 服务器连接和工具调用
@@ -28,11 +28,14 @@ import { eq } from 'drizzle-orm';
 
 import { t } from '@/i18n';
 import { parseMcpToolSchemaJson } from '@/utils/mcpSchemas';
+import { clampTimeoutMs, resolveAdaptiveTimeoutCeilingMs } from '@/utils/timeouts';
 
 import type { AiToolDefinition } from '../../contracts/tooling';
 import {
     extractMcpToolAttachments,
     formatMcpToolResponse,
+    localizeNativeMcpTimeoutError,
+    MCP_TIMEOUT_GUARD_GRACE_MS,
     normalizeErrorMessage,
     raceWithTimeoutAndSignal,
     readOptionalMcpArgs,
@@ -264,10 +267,11 @@ export class McpManager {
     async callTool(
         serverId: number,
         toolName: string,
-        args: Record<string, unknown>
+        args: Record<string, unknown>,
+        timeoutMs?: number
     ): Promise<McpToolCallResponse> {
         try {
-            return await mcp.callTool(serverId, toolName, args);
+            return await mcp.callTool(serverId, toolName, args, timeoutMs);
         } catch (error) {
             console.error(`[McpManager] Failed to call tool ${toolName}:`, error);
             throw error;
@@ -350,6 +354,9 @@ export class McpManager {
                                 tool.description ||
                                 t('agent.mcp.toolDescriptionFallback', { toolName: tool.name }),
                             input_schema: inputSchema as AiToolDefinition['input_schema'],
+                            adaptiveTimeoutCeilingMs: resolveAdaptiveTimeoutCeilingMs(
+                                server.tool_timeout
+                            ),
                         };
                     });
                     allTools.push(...toolsWithNamespace);
@@ -438,6 +445,7 @@ export class McpManager {
             iteration?: number;
             toolCallId?: string;
             resolved?: { serverId: number; originalName: string; toolTimeout: number };
+            requestedTimeoutMs?: number;
         }
     ): Promise<{
         result: string;
@@ -455,13 +463,57 @@ export class McpManager {
             throw new Error(t('agent.mcp.toolNotFound', { toolName }));
         }
 
-        // 将工具调用与超时和中止信号进行竞争
-        const callPromise = this.callTool(resolved.serverId, resolved.originalName, args);
-        const response = await raceWithTimeoutAndSignal(
-            callPromise,
-            resolved.toolTimeout,
-            options?.signal
+        // 服务器配置来自数据库，是无约束输入。正数必须是安全整数才能跨 Tauri 的
+        // u64 边界，也无法用本地计时器兜底；这类值只能报配置错误，不能静默变成
+        // “不设超时”，否则用户以为设了上限，实际调用完全不受限。
+        if (resolved.toolTimeout > 0 && !Number.isSafeInteger(resolved.toolTimeout)) {
+            throw new Error(
+                t('agent.mcp.invalidToolTimeout', { timeoutMs: String(resolved.toolTimeout) })
+            );
+        }
+
+        // 服务器配置的超时既是本次调用的默认值，也是硬上限：模型只能收紧。
+        // 配置非正数表示不设超时，此时保持用户的“不限制”语义，不接受模型建议。
+        const effectiveTimeout =
+            resolved.toolTimeout > 0
+                ? clampTimeoutMs(
+                      options?.requestedTimeoutMs,
+                      resolved.toolTimeout,
+                      resolved.toolTimeout
+                  )
+                : resolved.toolTimeout;
+
+        // 非正数沿用既有语义（不设超时），此时不向原生层传递超时参数。
+        const nativeTimeoutMs =
+            Number.isSafeInteger(effectiveTimeout) && effectiveTimeout > 0
+                ? effectiveTimeout
+                : undefined;
+
+        // 超时同时下发给 Rust：rmcp 会在到点时向服务器发送取消通知，避免本地已
+        // 判定超时、远端却仍在执行造成副作用重复。本地竞争只作兜底守卫，并多留
+        // 一个宽限窗口，让原生取消先于本地超时报告触发。
+        const callPromise = this.callTool(
+            resolved.serverId,
+            resolved.originalName,
+            args,
+            nativeTimeoutMs
         );
+        const guardTimeoutMs =
+            nativeTimeoutMs === undefined
+                ? effectiveTimeout
+                : nativeTimeoutMs + MCP_TIMEOUT_GUARD_GRACE_MS;
+        let response: McpToolCallResponse;
+        try {
+            response = await raceWithTimeoutAndSignal(
+                callPromise,
+                guardTimeoutMs,
+                options?.signal,
+                effectiveTimeout
+            );
+        } catch (error) {
+            // 原生超时通常先于本地守卫返回，统一翻译成既有超时文案。
+            throw localizeNativeMcpTimeoutError(error, effectiveTimeout);
+        }
 
         const result = formatMcpToolResponse(response);
         let attachments: Awaited<ReturnType<typeof extractMcpToolAttachments>> | undefined;

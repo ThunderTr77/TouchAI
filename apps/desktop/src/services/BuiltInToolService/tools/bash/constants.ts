@@ -14,6 +14,22 @@ import {
 export const BASH_TOOL_NAME = 'Bash';
 
 /**
+ * Bash 单次执行允许的超时上限（毫秒）。
+ *
+ * 必须与 Rust 侧 `core::built_in_tools::bash` 的 `MAX_TIMEOUT_MS` 保持一致：
+ * 这里是本地配置与模型建议超时的共同封顶值，任一侧更小都会造成静默截断。
+ */
+export const BASH_TOOL_TIMEOUT_MAX_MS = 120000;
+
+/**
+ * Bash 的“不设超时”配置值。
+ *
+ * 与常见 CLI 语义一致：`0` 表示关闭超时，命令只受用户取消约束，
+ * 用于人工确认过的长任务；正数则视为单次执行上限。
+ */
+export const BASH_TOOL_TIMEOUT_DISABLED = 0;
+
+/**
  * Bash 工具的审批策略。
  */
 export type BashApprovalMode = 'high_risk' | 'always' | 'never';
@@ -55,7 +71,8 @@ export const DEFAULT_BASH_TOOL_CONFIG: BashToolConfig = {
     approvalMode: 'high_risk',
     defaultWorkingDirectory: '',
     allowedWorkingDirectories: [],
-    timeoutMs: 15000,
+    // 与参考实现保持一致的前台默认值：2 分钟。
+    timeoutMs: BASH_TOOL_TIMEOUT_MAX_MS,
     maxOutputChars: 12000,
     compactOutput: false,
 };
@@ -84,7 +101,11 @@ export const bashToolConfigSchema = z
                 return value;
             }, z.array(nonEmptyTrimmedStringSchema).optional())
             .catch(undefined),
-        timeoutMs: optionalIntegerInRangeSchema(1000, 120000).catch(undefined),
+        // 0 表示不设超时（见 BASH_TOOL_TIMEOUT_DISABLED），正数则收敛到执行器上限。
+        timeoutMs: optionalIntegerInRangeSchema(
+            BASH_TOOL_TIMEOUT_DISABLED,
+            BASH_TOOL_TIMEOUT_MAX_MS
+        ).catch(undefined),
         maxOutputChars: optionalIntegerInRangeSchema(1000, 50000).catch(undefined),
         compactOutput: z.boolean().optional().catch(undefined),
     })

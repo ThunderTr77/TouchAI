@@ -10,6 +10,7 @@ import {
     type BuiltInToolId,
     builtInToolService,
 } from '@/services/BuiltInToolService';
+import { parseRequestedTimeoutMs } from '@/utils/timeouts';
 import { z } from '@/utils/zod';
 
 import { createProviderForModel, getModel, resolveToolDefinitions } from '../catalog';
@@ -473,6 +474,7 @@ export class AiRequestExecutor {
         toolCallMessageId: number | null;
         sessionId: number | null;
         onChunk?: RequestExecutionCallbacks['onChunk'];
+        requestedTimeoutMs?: number;
     }): Promise<{
         toolCall: AiToolCall;
         result: string;
@@ -539,6 +541,7 @@ export class AiRequestExecutor {
                 signal: options.signal,
                 iteration: options.iteration,
                 toolCallId: options.toolCall.id,
+                requestedTimeoutMs: options.requestedTimeoutMs,
                 resolved: {
                     serverId: mapping.serverId,
                     originalName: mapping.originalName,
@@ -873,10 +876,21 @@ export class AiRequestExecutor {
             };
         }
 
-        const { toolArgs } = parsedToolArguments;
+        // 只有声明了自适应超时的工具才会把 `_meta` 当作超时信封剥离；
+        // 其余工具（含自带 `_meta` 业务参数的 MCP 工具）原样透传参数。
+        const supportsAdaptiveTimeout =
+            runtime.tools?.some(
+                (tool) =>
+                    tool.name === options.toolCall.name &&
+                    tool.adaptiveTimeoutCeilingMs !== undefined
+            ) ?? false;
+        const { requestedTimeoutMs, sanitizedToolArgs } = supportsAdaptiveTimeout
+            ? parseRequestedTimeoutMs(parsedToolArguments.toolArgs)
+            : { requestedTimeoutMs: undefined, sanitizedToolArgs: parsedToolArguments.toolArgs };
+
         const builtInResult = await builtInToolService.executeTool({
             toolCall: options.toolCall,
-            toolArgs,
+            toolArgs: sanitizedToolArgs,
             iteration: runtime.iteration,
             currentModel: runtime.activeModel,
             hasExecutedBuiltInTool: (toolId) => runtime.executedBuiltInTools.has(toolId),
@@ -886,6 +900,7 @@ export class AiRequestExecutor {
             requestToolApproval: options.requestToolApproval,
             requestUserQuestions: options.requestUserQuestions,
             emitToolEvent: (toolEvent) => this.emitToolEvent(options.onChunk, toolEvent),
+            requestedTimeoutMs,
         });
 
         if (builtInResult) {
@@ -894,12 +909,13 @@ export class AiRequestExecutor {
 
         return this.executeMcpToolCall({
             toolCall: options.toolCall,
-            toolArgs,
+            toolArgs: sanitizedToolArgs,
             iteration: runtime.iteration,
             signal: options.signal,
             toolCallMessageId: options.toolCallMessageId,
             sessionId: options.persister.getSessionId(),
             onChunk: options.onChunk,
+            requestedTimeoutMs,
         });
     }
 

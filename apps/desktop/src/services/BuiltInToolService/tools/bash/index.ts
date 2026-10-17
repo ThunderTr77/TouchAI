@@ -4,8 +4,12 @@ import { native } from '@services/NativeService';
 
 import { t, tt } from '@/i18n';
 import { AiError, AiErrorCode } from '@/services/AgentService/contracts/errors';
-import type { ToolApprovalRequest } from '@/services/AgentService/contracts/tooling';
+import type {
+    AiToolDefinition,
+    ToolApprovalRequest,
+} from '@/services/AgentService/contracts/tooling';
 import { normalizeOptionalString, truncateText } from '@/utils/text';
+import { clampTimeoutMs, resolveAdaptiveTimeoutCeilingMs } from '@/utils/timeouts';
 
 import {
     type BaseBuiltInToolExecutionContext,
@@ -19,6 +23,7 @@ import {
     BASH_TOOL_DESCRIPTION,
     BASH_TOOL_INPUT_SCHEMA,
     BASH_TOOL_NAME,
+    BASH_TOOL_TIMEOUT_DISABLED,
     type BashApprovalMode,
     bashApprovalPayloadSchema,
     type BashCommandContext,
@@ -153,12 +158,20 @@ export async function executeBashTool(
     context: BaseBuiltInToolExecutionContext
 ): Promise<BuiltInToolExecutionResult> {
     const commandContext = await resolveCommandContext(args, config);
+
+    // 用户配置的超时既是本次执行的默认值，也是硬上限：模型只能收紧。
+    // 配置为 0 表示不设超时，此时忽略模型建议（工具目录也不会给它 `_meta`）。
+    const effectiveTimeout =
+        config.timeoutMs > 0
+            ? clampTimeoutMs(context.requestedTimeoutMs, config.timeoutMs, config.timeoutMs)
+            : BASH_TOOL_TIMEOUT_DISABLED;
+
     const response = await executeCancelableBash(
         {
             executionId: context.callId,
             command: commandContext.command,
             workingDirectory: commandContext.workingDirectory,
-            timeoutMs: config.timeoutMs,
+            timeoutMs: effectiveTimeout,
             compactOutput: config.compactOutput,
             rawOutput: commandContext.rawOutput,
         },
@@ -204,6 +217,18 @@ class BashTool extends BuiltInTool<BashToolConfig> {
     readonly description = BASH_TOOL_DESCRIPTION;
     readonly inputSchema = BASH_TOOL_INPUT_SCHEMA;
     readonly defaultConfig = DEFAULT_BASH_TOOL_CONFIG;
+
+    /**
+     * 用户配置的超时同时是模型可建议区间的上限：模型只能收紧本次执行。
+     */
+    override buildToolDefinition(namespacedName: string, config: BashToolConfig): AiToolDefinition {
+        return {
+            name: namespacedName,
+            description: this.description,
+            input_schema: this.inputSchema,
+            adaptiveTimeoutCeilingMs: resolveAdaptiveTimeoutCeilingMs(config.timeoutMs),
+        };
+    }
 
     override parseConfig(configJson: string | null): BashToolConfig {
         return parseBashToolConfig(configJson);

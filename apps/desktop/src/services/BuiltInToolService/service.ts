@@ -67,6 +67,7 @@ interface BuiltInToolExecutionOptions {
         questions: AskUserQuestion[]
     ) => Promise<AskUserAnswer[] | null>;
     emitToolEvent: (event: ToolEvent) => void;
+    requestedTimeoutMs?: number;
 }
 
 interface BuiltInToolExecutionResponse {
@@ -187,6 +188,7 @@ class BuiltInToolService {
                         name: `${BUILT_IN_TOOL_PREFIX}${tool.tool_id}`,
                         description: descriptor.description,
                         input_schema: descriptor.inputSchema,
+                        adaptiveTimeoutCeilingMs: descriptor.adaptiveTimeoutCeilingMs,
                     });
                 }
             } catch (error) {
@@ -313,6 +315,7 @@ class BuiltInToolService {
             emitToolEvent: options.emitToolEvent,
             hasExecutedBuiltInTool: options.hasExecutedBuiltInTool,
             requestUserQuestions: options.requestUserQuestions,
+            requestedTimeoutMs: options.requestedTimeoutMs,
         };
 
         const callStartTime = Date.now();
