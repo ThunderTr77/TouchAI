@@ -2,6 +2,8 @@
 
 import { isLlmMetadataAliasEmpty, isLlmMetadataEmpty } from '@database/queries';
 import { appUpdateService } from '@services/AppUpdateService';
+import { initializeAppUpdateNotifications } from '@services/AppUpdateService/notifications';
+import { getNextAppUpdateCheckAt, isWithinAppUpdateHours } from '@services/AppUpdateService/timing';
 import { initializeLogger } from '@services/LoggerService';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -11,13 +13,6 @@ import { createApp } from 'vue';
 import App from './App.vue';
 import { installI18n } from './i18n';
 import router from './router';
-import {
-    refreshModelMetadataIfStale,
-    seedModelMetadataFromSnapshot,
-    syncAllModelsMetadata,
-} from './services/AgentService/infrastructure/modelMetadata';
-import { builtInToolService } from './services/BuiltInToolService/service';
-import { prewarmBashToolRuntime } from './services/BuiltInToolService/tools/bash/helper';
 import { useSettingsStore } from './stores/settings';
 import { initializeFontLoader } from './utils/font';
 
@@ -49,6 +44,13 @@ function isAuxiliaryRoute(): boolean {
 
 function shouldUseLightweightBootstrap(): boolean {
     return isAuxiliaryWindowLabel(getCurrentWindowLabel()) || isAuxiliaryRoute();
+}
+
+function isSettingsWindow(): boolean {
+    return (
+        getCurrentWindowLabel() === 'settings' ||
+        /^#\/settings(?:[/?]|$)/.test(window.location.hash)
+    );
 }
 
 function isInternalLink(url: string): boolean {
@@ -116,14 +118,27 @@ function setupLinkInterceptor(): void {
 }
 
 function scheduleAppUpdateChecks(): void {
-    const runAutomaticCheck = () => {
-        appUpdateService.checkNow('automatic').catch((error) => {
-            console.warn('[AppUpdateService] Automatic update check failed:', error);
-        });
+    const runAndScheduleNextCheck = async () => {
+        const now = Date.now();
+        if (isWithinAppUpdateHours(now)) {
+            await appUpdateService.checkNow('automatic').catch((error) => {
+                console.warn('[AppUpdateService] Automatic update check failed:', error);
+            });
+        }
+
+        // The interval gate records completion time, so schedule from completion as well.
+        const completedAt = Date.now();
+        window.setTimeout(
+            runAndScheduleNextCheck,
+            getNextAppUpdateCheckAt(completedAt) - completedAt
+        );
     };
 
-    runAutomaticCheck();
-    window.setInterval(runAutomaticCheck, 60 * 60 * 1000);
+    void initializeAppUpdateNotifications()
+        .catch((error) => {
+            console.warn('[AppUpdateService] Failed to initialize update notifications:', error);
+        })
+        .finally(runAndScheduleNextCheck);
 }
 
 /**
@@ -138,6 +153,8 @@ async function initializeModelMetadata(): Promise<void> {
             return;
         }
 
+        const { syncAllModelsMetadata } =
+            await import('./services/AgentService/infrastructure/modelMetadata');
         await syncAllModelsMetadata();
     } catch (error) {
         console.warn('[Bootstrap] Failed to initialize model metadata:', error);
@@ -151,9 +168,11 @@ async function initializeModelMetadata(): Promise<void> {
  */
 function scheduleModelMetadataRefresh(): void {
     const runRefresh = () => {
-        refreshModelMetadataIfStale().catch((error) => {
-            console.warn('[Bootstrap] Failed to refresh model metadata:', error);
-        });
+        void import('./services/AgentService/infrastructure/modelMetadata')
+            .then(({ refreshModelMetadataIfStale }) => refreshModelMetadataIfStale())
+            .catch((error) => {
+                console.warn('[Bootstrap] Failed to refresh model metadata:', error);
+            });
     };
 
     runRefresh();
@@ -165,6 +184,8 @@ function scheduleModelMetadataRefresh(): void {
  */
 async function seedBundledModelMetadata(): Promise<void> {
     try {
+        const { seedModelMetadataFromSnapshot } =
+            await import('./services/AgentService/infrastructure/modelMetadata');
         await seedModelMetadataFromSnapshot();
     } catch (error) {
         console.warn('[Bootstrap] Failed to seed bundled model metadata:', error);
@@ -173,6 +194,7 @@ async function seedBundledModelMetadata(): Promise<void> {
 
 async function syncBuiltInTools(): Promise<void> {
     try {
+        const { builtInToolService } = await import('./services/BuiltInToolService/service');
         await builtInToolService.syncRegisteredTools();
     } catch (error) {
         console.warn('[Bootstrap] Failed to sync built-in tools:', error);
@@ -181,6 +203,8 @@ async function syncBuiltInTools(): Promise<void> {
 
 async function prewarmBuiltInBash(): Promise<void> {
     try {
+        const { prewarmBashToolRuntime } =
+            await import('./services/BuiltInToolService/tools/bash/helper');
         await prewarmBashToolRuntime();
     } catch (error) {
         console.warn('[Bootstrap] Failed to prewarm built-in Bash runtime:', error);
@@ -204,8 +228,11 @@ export async function initializeApp() {
     }
 
     initializeFontLoader();
-    await Promise.all([syncBuiltInTools(), prewarmBuiltInBash()]);
-    await initializeModelMetadata();
+    const settingsWindow = isSettingsWindow();
+    if (!settingsWindow) {
+        await Promise.all([syncBuiltInTools(), prewarmBuiltInBash()]);
+        await initializeModelMetadata();
+    }
 
     let settingsInitializeError: unknown;
     try {
@@ -223,6 +250,10 @@ export async function initializeApp() {
         );
     }
 
-    scheduleAppUpdateChecks();
-    scheduleModelMetadataRefresh();
+    if (!settingsWindow) {
+        if (getCurrentWindowLabel() === 'main') {
+            scheduleAppUpdateChecks();
+        }
+        scheduleModelMetadataRefresh();
+    }
 }

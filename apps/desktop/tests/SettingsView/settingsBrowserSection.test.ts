@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLocale } from '@/i18n';
 import BrowserSettingsView from '@/views/SettingsView/components/Browser/index.vue';
 import { resetBrowserRuntimeCacheForTests } from '@/views/SettingsView/components/Browser/runtimeCache';
+import { searchSettings } from '@/views/SettingsView/settingsSearch';
 
 const updateBrowserSettingsMock = vi.hoisted(() => vi.fn(async () => undefined));
 const browserSettingsPatch = vi.hoisted(() => ({
@@ -173,6 +174,33 @@ describe('Browser settings section', () => {
         );
     });
 
+    it('navigates browser search results to their matching controls', () => {
+        const wrapper = mount(BrowserSettingsView);
+        const windowSizeResult = searchSettings('窗口尺寸').find(
+            (result) => result.section === 'browser'
+        );
+        expect(windowSizeResult?.targetId).toBe('browser-window-size');
+        const windowSizeRow = wrapper.get(
+            `[data-settings-search-target="${windowSizeResult!.targetId}"]`
+        );
+        expect(windowSizeRow.find('[data-testid="browser-window-width-input"]').exists()).toBe(
+            true
+        );
+        expect(windowSizeRow.find('[data-testid="browser-window-height-input"]').exists()).toBe(
+            true
+        );
+
+        const userAgentResult = searchSettings('User-Agent').find(
+            (result) => result.section === 'browser'
+        );
+        expect(userAgentResult?.targetId).toBe('browser-user-agent');
+        expect(
+            wrapper
+                .get(`[data-settings-search-target="${userAgentResult!.targetId}"] input`)
+                .attributes('placeholder')
+        ).toBe('Mozilla/5.0 ...');
+    });
+
     it('renders localized homepage validation text', async () => {
         const wrapper = mount(BrowserSettingsView);
 
@@ -221,6 +249,72 @@ describe('Browser settings section', () => {
         ).toBeDefined();
         expect(wrapper.find('[data-testid="custom-select"]').attributes('disabled')).toBeDefined();
     });
+
+    it.each(['blocked', 'allowed'] as const)(
+        'hides the %s domain empty state while editing and closes a blank draft on blur',
+        async (kind) => {
+            const wrapper = mount(BrowserSettingsView);
+            const section = wrapper.get(`[data-settings-search-target="browser-${kind}-domains"]`);
+
+            await section.get('[data-testid="empty-state"] button').trigger('click');
+
+            expect(section.find('[data-testid="empty-state"]').exists()).toBe(false);
+            expect(section.get('button[aria-label="取消"]').text()).toBe('');
+
+            await section.get('input').setValue('   ');
+            await section.get('input').trigger('blur');
+
+            expect(section.find('input').exists()).toBe(false);
+            expect(section.find('[data-testid="empty-state"]').exists()).toBe(true);
+            expect(updateBrowserSettingsMock).not.toHaveBeenCalled();
+            wrapper.unmount();
+        }
+    );
+
+    it.each(['blocked', 'allowed'] as const)(
+        'keeps an unsubmitted %s domain on blur until the cancel icon is clicked',
+        async (kind) => {
+            const wrapper = mount(BrowserSettingsView);
+            const section = wrapper.get(`[data-settings-search-target="browser-${kind}-domains"]`);
+
+            await section.get('button').trigger('click');
+            await section.get('input').setValue('example.com');
+            await section.get('input').trigger('blur');
+
+            expect(section.get('input').element).toMatchObject({ value: 'example.com' });
+            expect(section.find('[data-testid="empty-state"]').exists()).toBe(false);
+
+            await section.get('button[aria-label="取消"]').trigger('click');
+
+            expect(section.find('input').exists()).toBe(false);
+            expect(section.find('[data-testid="empty-state"]').exists()).toBe(true);
+            await section.get('button').trigger('click');
+            expect(section.get('input').element).toMatchObject({ value: '' });
+            expect(updateBrowserSettingsMock).not.toHaveBeenCalled();
+            wrapper.unmount();
+        }
+    );
+
+    it.each(['blocked', 'allowed'] as const)(
+        'saves a normalized %s domain on Enter with the cancel-only editor',
+        async (kind) => {
+            const wrapper = mount(BrowserSettingsView);
+            const section = wrapper.get(`[data-settings-search-target="browser-${kind}-domains"]`);
+
+            await section.get('button').trigger('click');
+            await section.get('input').setValue(' EXAMPLE.com ');
+            await section.get('input').trigger('keydown', { key: 'Enter' });
+            await vi.advanceTimersByTimeAsync(300);
+
+            expect(section.find('button[aria-label="取消"]').exists()).toBe(false);
+            expect(section.get('input[readonly]').element).toMatchObject({ value: 'example.com' });
+            expect(section.find('[data-testid="empty-state"]').exists()).toBe(false);
+            expect(updateBrowserSettingsMock).toHaveBeenLastCalledWith(
+                expect.objectContaining({ [`${kind}Domains`]: [{ domain: 'example.com' }] })
+            );
+            wrapper.unmount();
+        }
+    );
 
     it('renders browser settings copy in English when locale is English', () => {
         setLocale('en-US');
