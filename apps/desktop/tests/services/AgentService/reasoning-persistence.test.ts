@@ -23,6 +23,7 @@ const queries = vi.hoisted(() => ({
     updateSessionTurnAttempt: vi.fn(),
     refreshSessionMetadata: vi.fn(),
     appendMessagePart: vi.fn(),
+    findToolCallPartByCallId: vi.fn(),
     mergeMessagePartData: vi.fn(),
     createMessageAttachment: vi.fn(),
 }));
@@ -421,22 +422,65 @@ describe('reasoning persistence', () => {
         );
     });
 
-    it('appends an unmatched tool result as text on the tool step message', async () => {
+    it('recovers the tool_call part by call id instead of writing assistant text', async () => {
+        // 工具结果只能落在 tool_call 片段上。主键丢了就按 tool_call_id 反查，
+        // 绝不把结果写成一条助手文本（那会在对话里渲染成大段原始工具输出）。
+        queries.findToolCallPartByCallId.mockResolvedValueOnce({ id: 77 } as never);
+        const projector = createProjector();
+        await projector.recordTurnStart(createCheckpoint());
+
+        await projector.persistToolResult({
+            result: 'recovered output',
+            toolCallId: 'call-77',
+            toolCallPartId: null,
+            toolCallMessageId: 11,
+        });
+
+        // 只在拿到消息 id 时才反查，避免命中更早消息里的同 id 片段。
+        expect(queries.findToolCallPartByCallId).toHaveBeenCalledWith('call-77', 11);
+        expect(queries.mergeMessagePartData).toHaveBeenCalledWith(
+            77,
+            { output: 'recovered output' },
+            expect.anything()
+        );
+        expect(queries.appendMessagePart).not.toHaveBeenCalled();
+    });
+
+    it('skips the call-id lookup when the tool-call message is unknown', async () => {
+        // 没有消息 id 就不做不限定的反查：`tool_call_id` 只保证在单条消息内唯一，
+        // 命中了更早消息里的同 id 片段会把结果写错地方。
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        const projector = createProjector();
+        await projector.recordTurnStart(createCheckpoint());
+
+        await projector.persistToolResult({
+            result: 'no message to attach to',
+            toolCallId: 'call-77',
+            toolCallPartId: null,
+            toolCallMessageId: null,
+        });
+
+        expect(queries.findToolCallPartByCallId).not.toHaveBeenCalled();
+        expect(queries.mergeMessagePartData).not.toHaveBeenCalled();
+        errorSpy.mockRestore();
+    });
+
+    it('drops an unmatched tool result rather than storing it as assistant text', async () => {
+        queries.findToolCallPartByCallId.mockResolvedValueOnce(undefined as never);
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
         const projector = createProjector();
         await projector.recordTurnStart(createCheckpoint());
 
         await projector.persistToolResult({
             result: 'unmatched output',
+            toolCallId: 'call-missing',
             toolCallPartId: null,
             toolCallMessageId: 11,
         });
 
-        expect(queries.appendMessagePart).toHaveBeenCalledWith(
-            11,
-            { type: 'text', content: 'unmatched output', data: '{}' },
-            expect.anything()
-        );
+        expect(queries.appendMessagePart).not.toHaveBeenCalled();
         expect(queries.mergeMessagePartData).not.toHaveBeenCalled();
+        errorSpy.mockRestore();
     });
 
     it('ignores an unmatched empty tool result', async () => {

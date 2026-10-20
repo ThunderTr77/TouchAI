@@ -118,12 +118,24 @@ async function buildAttachmentStoragePath(
     return join(shardDir, hash);
 }
 
-async function ensureAttachmentRecord(
+/**
+ * 附件落盘（hash + 文件复制）的结果。
+ *
+ * 必须先于写事务完成：放在事务内会把持锁时长抬到秒级，
+ * 并发写库时直接撞满 5s 的 busy_timeout。
+ */
+type PreparedAttachment = {
+    hash: string;
+    name: string;
+    mimeType: string | null;
+    size: number | null;
+};
+
+/** 只做文件 I/O，不碰数据库：供事务外预计算。 */
+async function prepareAttachment(
     type: AttachmentIndex['type'],
-    path: string,
-    originPath: string,
-    database: DatabaseExecutor = db
-): Promise<AttachmentEntity> {
+    path: string
+): Promise<PreparedAttachment> {
     const [hash, name, mimeType, size] = await Promise.all([
         computeAttachmentHash(path),
         getFileName(path),
@@ -131,13 +143,25 @@ async function ensureAttachmentRecord(
         getFileSize(path),
     ]);
 
+    const targetPath = await buildAttachmentStoragePath(type, hash);
+    await copyFile(path, targetPath);
+
+    return { hash, name, mimeType: mimeType ?? null, size };
+}
+
+async function ensureAttachmentRecord(
+    type: AttachmentIndex['type'],
+    path: string,
+    originPath: string,
+    database: DatabaseExecutor = db,
+    prepared?: PreparedAttachment
+): Promise<AttachmentEntity> {
+    const { hash, name, mimeType, size } = prepared ?? (await prepareAttachment(type, path));
+
     const existing = await findAttachmentByHash(hash, database);
     if (existing) {
         return existing;
     }
-
-    const targetPath = await buildAttachmentStoragePath(type, hash);
-    await copyFile(path, targetPath);
 
     try {
         return await createAttachmentRecord(
@@ -146,7 +170,7 @@ async function ensureAttachmentRecord(
                 type,
                 original_name: name,
                 origin_path: originPath,
-                mime_type: mimeType ?? null,
+                mime_type: mimeType,
                 size,
             },
             database
@@ -332,6 +356,30 @@ export async function ensurePersistedAttachmentIndex(
     attachment: AttachmentIndex,
     database: DatabaseExecutor = db
 ): Promise<AttachmentEntity> {
+    return persistPreparedAttachment(attachment, database);
+}
+
+/**
+ * 事务外预计算：只做 hash 与文件复制，不碰数据库。
+ *
+ * 调用方在开启写事务前先跑这一步，事务内就只剩几条 SQL。
+ */
+export async function prepareAttachmentForPersistence(attachment: AttachmentIndex): Promise<void> {
+    if (attachment.attachmentId && attachment.hash) {
+        return;
+    }
+
+    preparedAttachments.set(attachment, await prepareAttachment(attachment.type, attachment.path));
+}
+
+/** 事务外预计算结果，按附件实例缓存。 */
+const preparedAttachments = new WeakMap<AttachmentIndex, PreparedAttachment>();
+
+/** 写入附件记录；若未预计算则退化为就地计算。 */
+export async function persistPreparedAttachment(
+    attachment: AttachmentIndex,
+    database: DatabaseExecutor = db
+): Promise<AttachmentEntity> {
     if (attachment.attachmentId && attachment.hash) {
         return {
             id: attachment.attachmentId,
@@ -349,8 +397,20 @@ export async function ensurePersistedAttachmentIndex(
         attachment.type,
         attachment.path,
         attachment.originPath,
-        database
+        database,
+        preparedAttachments.get(attachment)
     );
+    preparedAttachments.delete(attachment);
+    await syncAttachmentIndexFromRecord(attachment, persisted);
+
+    return persisted;
+}
+
+/** 把数据库记录回写到调用方的附件引用上。 */
+async function syncAttachmentIndexFromRecord(
+    attachment: AttachmentIndex,
+    persisted: AttachmentEntity
+): Promise<void> {
     attachment.attachmentId = persisted.id;
     attachment.hash = persisted.hash;
     attachment.path = await buildAttachmentStoragePath(persisted.type, persisted.hash);
@@ -358,6 +418,4 @@ export async function ensurePersistedAttachmentIndex(
     attachment.size = persisted.size ?? undefined;
     attachment.mimeType = persisted.mime_type ?? undefined;
     attachment.preview = await buildPreview(persisted.type, attachment.path);
-
-    return persisted;
 }

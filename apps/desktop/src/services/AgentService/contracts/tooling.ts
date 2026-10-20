@@ -150,6 +150,17 @@ export interface ShowWidgetEventPayload {
 }
 
 /**
+ * 工具产出的结构化载荷。
+ *
+ * `result` 是给模型读的文本，这里是给 UI 渲染的结构化数据。
+ * 形状与 `webSearch/sources.ts` 的 `WebSearchSourcesPayload` 一致；
+ * 那边是工具层，这里不能反向依赖，所以用 `import type` 只在类型层引用。
+ */
+export type ToolEventStructuredPayload = {
+    kind: 'web_search_sources';
+} & import('@/services/BuiltInToolService/tools/webSearch/sources').WebSearchSourcesPayload;
+
+/**
  * Agent 循环过程中发给 UI 的统一事件。
  */
 export type ToolEvent =
@@ -173,6 +184,12 @@ export type ToolEvent =
           durationMs: number;
           finalStatus?: 'completed' | 'error' | 'rejected';
           builtinConversationSemantic?: ToolEventBuiltInConversationSemantic;
+          /**
+           * 工具产出的结构化载荷（如 WebSearch 的来源列表）。
+           *
+           * 与 `result` 并行：`result` 是给模型读的文本，这里给 UI 渲染卡片与引用。
+           */
+          structuredPayload?: ToolEventStructuredPayload;
       }
     | {
           type: 'result_delta';

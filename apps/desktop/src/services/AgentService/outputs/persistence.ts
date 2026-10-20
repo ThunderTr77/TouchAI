@@ -2,13 +2,13 @@
 
 import { type DatabaseExecutor, db } from '@database';
 import {
-    appendMessagePart,
     createMessage,
     createMessageAttachment,
     createMessageParts,
     createSession,
     createSessionTurn,
     createSessionTurnAttempt,
+    findToolCallPartByCallId,
     mergeMessagePartData,
     refreshSessionMetadata,
     syncOutputParts,
@@ -29,6 +29,8 @@ import {
     type AttachmentIndex,
     createEmptyAttachmentDeliveryManifest,
     ensurePersistedAttachmentIndex,
+    persistPreparedAttachment,
+    prepareAttachmentForPersistence,
     serializeAttachmentDeliveryManifest,
     upsertAttachmentDeliveryManifestRequest,
 } from '@/services/AgentService/infrastructure/attachments';
@@ -156,6 +158,13 @@ export class PersistenceProjector {
      * 记录轮次开始阶段：先记录用户消息，再创建流式处理中状态的轮次与首次尝试记录。
      */
     async recordTurnStart(initialCheckpoint: AttemptCheckpoint): Promise<void> {
+        // 同 persistToolResult：附件 I/O 在写事务外完成。
+        if (!this.userMessageId && this.attachments.length > 0) {
+            await Promise.all(
+                this.attachments.map((attachment) => prepareAttachmentForPersistence(attachment))
+            );
+        }
+
         const result = await db.transaction(async (tx) => {
             await this.syncSessionIdentity(tx);
 
@@ -164,7 +173,7 @@ export class PersistenceProjector {
                     ? []
                     : await Promise.all(
                           this.attachments.map((attachment) =>
-                              ensurePersistedAttachmentIndex(attachment, tx)
+                              persistPreparedAttachment(attachment, tx)
                           )
                       );
 
@@ -426,38 +435,50 @@ export class PersistenceProjector {
      *
      * 工具执行服务已写入 output/status/duration；这里负责兜底补齐结果文本，
      * 并把结果附件挂到工具调用所在消息上（附件 data 记录 toolCallId 归属）。
-     * 找不到工具片段时（参数协议错误等）退化为在工具步骤消息末尾追加文本。
+     *
+     * 结果**只能**落在 `tool_call` 片段上。片段主键丢了就按 `tool_call_id` 反查，
+     * 实在找不到宁愿丢掉并报错，也绝不把结果写成一条助手文本——
+     * 那会让工具输出混进模型正文，在对话里渲染成大段原始内容。
      */
     async persistToolResult(options: {
         result: string;
+        toolCallId?: string | null;
         toolCallPartId: number | null;
         toolCallMessageId: number | null;
         attachments?: AttachmentIndex[];
     }): Promise<void> {
-        const { result, toolCallPartId, toolCallMessageId, attachments = [] } = options;
-        if (toolCallPartId === null) {
-            if (toolCallMessageId !== null && result) {
-                await db.transaction(async (tx) => {
-                    await appendMessagePart(
-                        toolCallMessageId,
-                        { type: 'text', content: result, data: '{}' },
-                        tx
-                    );
-                    await refreshSessionMetadata(await this.ensureSessionId(tx), tx);
-                });
-            }
+        const { result, toolCallId, attachments = [] } = options;
+        let partId = options.toolCallPartId;
+
+        // 只在拿到消息 id 时才反查：`tool_call_id` 只保证在单条消息内唯一，
+        // 不限定的反查可能命中更早消息里的同 id 片段，把结果写错地方。
+        if (partId === null && toolCallId && options.toolCallMessageId !== null) {
+            const found = await findToolCallPartByCallId(toolCallId, options.toolCallMessageId);
+            partId = found?.id ?? null;
+        }
+
+        if (partId === null) {
+            console.error(
+                '[persistence] Tool result has no tool_call part to attach to; dropping it.',
+                { toolCallId, toolCallMessageId: options.toolCallMessageId }
+            );
             return;
         }
 
+        // 附件 hash 与落盘是纯文件 I/O，先于写事务完成，避免持写锁做 I/O。
+        await Promise.all(
+            attachments.map((attachment) => prepareAttachmentForPersistence(attachment))
+        );
+
         await db.transaction(async (tx) => {
-            const part = await mergeMessagePartData(toolCallPartId, { output: result }, tx);
+            const part = await mergeMessagePartData(partId, { output: result }, tx);
             if (!part) {
                 return;
             }
 
             if (attachments.length > 0) {
                 const persisted = await Promise.all(
-                    attachments.map((attachment) => ensurePersistedAttachmentIndex(attachment, tx))
+                    attachments.map((attachment) => persistPreparedAttachment(attachment, tx))
                 );
                 for (const [index, entity] of persisted.entries()) {
                     const source = attachments[index]!;

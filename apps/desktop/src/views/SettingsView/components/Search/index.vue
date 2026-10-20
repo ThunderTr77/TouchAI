@@ -106,6 +106,12 @@
             keyPlaceholder: 'settings.search.provider.searxng.keyPlaceholder',
             quotaLabel: 'settings.search.provider.searxng.quota',
         },
+        deepseek: {
+            label: 'settings.search.provider.deepseek',
+            description: 'settings.search.provider.deepseek.description',
+            keyPlaceholder: 'settings.search.provider.deepseek.keyPlaceholder',
+            quotaLabel: 'settings.search.provider.deepseek.quota',
+        },
     };
 
     const intentMessages: Record<
