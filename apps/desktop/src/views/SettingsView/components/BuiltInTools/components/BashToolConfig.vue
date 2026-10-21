@@ -2,6 +2,8 @@
 
 <script setup lang="ts">
     import AppIcon from '@components/AppIcon.vue';
+    import { Input } from '@components/ui/input';
+    import { Switch } from '@components/ui/switch';
     import { open } from '@tauri-apps/plugin-dialog';
 
     import { t } from '@/i18n';
@@ -163,13 +165,14 @@
                         {{ t('settings.builtInTools.bash.defaultWorkingDirectory') }}
                     </label>
                     <div class="mt-1.5 flex gap-2">
-                        <input
-                            :value="modelValue.defaultWorkingDirectory"
+                        <Input
+                            variant="filled"
+                            :model-value="modelValue.defaultWorkingDirectory"
                             :disabled="disabled"
                             readonly
                             type="text"
                             spellcheck="false"
-                            class="settings-input flex-1 font-mono disabled:bg-neutral-50"
+                            class="flex-1 font-mono disabled:bg-neutral-50"
                             :placeholder="
                                 t('settings.builtInTools.bash.defaultWorkingDirectoryPlaceholder')
                             "
@@ -211,13 +214,14 @@
                             :key="index"
                             class="flex gap-2"
                         >
-                            <input
-                                :value="directory"
+                            <Input
+                                variant="filled"
+                                :model-value="directory"
                                 :disabled="disabled"
                                 readonly
                                 type="text"
                                 spellcheck="false"
-                                class="settings-input flex-1 px-4 py-2.5 font-mono disabled:bg-neutral-50"
+                                class="flex-1 px-4 py-2.5 font-mono disabled:bg-neutral-50"
                                 placeholder="D:\\Project\\TouchAI"
                             />
                             <button
@@ -252,13 +256,14 @@
                     <label class="block text-sm font-medium text-neutral-700">
                         {{ t('settings.builtInTools.bash.timeoutMs') }}
                     </label>
-                    <input
-                        :value="modelValue.timeoutMs"
+                    <Input
+                        variant="filled"
+                        :model-value="modelValue.timeoutMs"
                         :disabled="disabled"
                         type="number"
                         min="0"
                         max="120000"
-                        class="settings-input mt-1.5 w-full disabled:bg-neutral-50"
+                        class="mt-1.5 w-full disabled:bg-neutral-50"
                         @input="updateTimeoutMs"
                     />
                     <p class="mt-1 text-xs text-neutral-500">
@@ -270,13 +275,14 @@
                     <label class="block text-sm font-medium text-neutral-700">
                         {{ t('settings.builtInTools.bash.outputLimitChars') }}
                     </label>
-                    <input
-                        :value="modelValue.maxOutputChars"
+                    <Input
+                        variant="filled"
+                        :model-value="modelValue.maxOutputChars"
                         :disabled="disabled"
                         type="number"
                         min="1000"
                         max="50000"
-                        class="settings-input mt-1.5 w-full disabled:bg-neutral-50"
+                        class="mt-1.5 w-full disabled:bg-neutral-50"
                         @input="
                             patch({
                                 maxOutputChars: Number(
@@ -294,31 +300,14 @@
                     <p class="mt-0.5 font-serif text-xs text-gray-400">
                         {{ t('settings.builtInTools.bash.compactOutputDescription') }}
                     </p>
-                    <label class="relative mt-1.5 inline-flex shrink-0 cursor-pointer items-center">
-                        <input
-                            type="checkbox"
-                            :checked="modelValue.compactOutput"
-                            :disabled="disabled"
-                            class="peer sr-only"
-                            @change="patch({ compactOutput: !modelValue.compactOutput })"
-                        />
-                        <div
-                            class="peer t-toggle-track h-5 w-9 rounded-full"
-                            :class="{
-                                'bg-primary-500': modelValue.compactOutput,
-                                'bg-gray-200': !modelValue.compactOutput,
-                                'cursor-not-allowed opacity-50': disabled,
-                            }"
-                        >
-                            <div
-                                class="t-toggle-thumb absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white"
-                                :class="{
-                                    'translate-x-4': modelValue.compactOutput,
-                                    'translate-x-0': !modelValue.compactOutput,
-                                }"
-                            ></div>
-                        </div>
-                    </label>
+                    <Switch
+                        size="md"
+                        tone="subtle"
+                        class="mt-1.5"
+                        :model-value="modelValue.compactOutput"
+                        :disabled="disabled"
+                        @update:model-value="patch({ compactOutput: !modelValue.compactOutput })"
+                    />
                 </div>
             </div>
         </div>

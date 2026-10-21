@@ -1,6 +1,8 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
     import AlertMessage from '@components/AlertMessage.vue';
     import CustomSelect from '@components/CustomSelect.vue';
+    import SettingsRow from '@components/SettingsRow.vue';
+    import { Switch } from '@components/ui/switch';
     import { native } from '@services/NativeService';
     import { storeToRefs } from 'pinia';
     import { computed, onMounted, ref, watch } from 'vue';
@@ -195,88 +197,55 @@
                     data-testid="settings-general-card-launch"
                     class="settings-row-group divide-y divide-neutral-200/70"
                 >
-                    <div
+                    <SettingsRow
                         data-settings-search-target="start-on-boot"
-                        class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                        control-width="auto"
+                        :label="t('settings.general.startOnBoot')"
+                        :label-attrs="{ 'data-testid': 'settings-general-row-label' }"
                     >
-                        <div
-                            data-testid="settings-general-row-label"
-                            class="text-[13px] leading-6 font-normal text-neutral-900"
-                        >
-                            {{ t('settings.general.startOnBoot') }}
-                        </div>
-                        <button
-                            :class="[
-                                't-toggle-track relative inline-flex h-5 w-9 items-center rounded-full',
-                                settings.startOnBoot ? 'settings-toggle-enabled' : 'bg-neutral-200',
-                            ]"
-                            @click="
+                        <Switch
+                            size="lg"
+                            :model-value="settings.startOnBoot"
+                            @update:model-value="
                                 settings.startOnBoot = !settings.startOnBoot;
                                 saveStartOnBoot();
                             "
-                        >
-                            <span
-                                :class="[
-                                    't-toggle-thumb inline-block h-3.5 w-3.5 transform rounded-full bg-white',
-                                    settings.startOnBoot ? 'translate-x-[18px]' : 'translate-x-1',
-                                ]"
-                            />
-                        </button>
-                    </div>
+                        />
+                    </SettingsRow>
 
-                    <div
+                    <SettingsRow
                         data-settings-search-target="start-minimized"
-                        class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                        control-width="auto"
+                        :label="t('settings.general.startMinimized')"
+                        :label-attrs="{ 'data-testid': 'settings-general-row-label' }"
                     >
-                        <div
-                            data-testid="settings-general-row-label"
-                            class="text-[13px] leading-6 font-normal text-neutral-900"
-                        >
-                            {{ t('settings.general.startMinimized') }}
-                        </div>
-                        <button
-                            :class="[
-                                't-toggle-track relative inline-flex h-5 w-9 items-center rounded-full',
-                                settings.startMinimized
-                                    ? 'settings-toggle-enabled'
-                                    : 'bg-neutral-200',
-                            ]"
+                        <Switch
+                            size="lg"
                             data-testid="settings-start-minimized-toggle"
-                            :aria-pressed="settings.startMinimized"
-                            @click="
+                            :model-value="settings.startMinimized"
+                            @update:model-value="
                                 settings.startMinimized = !settings.startMinimized;
                                 saveStartMinimized();
                             "
-                        >
-                            <span
-                                :class="[
-                                    't-toggle-thumb inline-block h-3.5 w-3.5 transform rounded-full bg-white',
-                                    settings.startMinimized
-                                        ? 'translate-x-[18px]'
-                                        : 'translate-x-1',
-                                ]"
-                            />
-                        </button>
-                    </div>
+                        />
+                    </SettingsRow>
 
-                    <div
+                    <SettingsRow
                         data-settings-search-target="window-size"
-                        class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_180px] sm:items-center"
+                        control-width="180"
+                        label-as="label"
+                        label-class="block"
+                        :label="t('settings.general.windowSize')"
+                        :label-attrs="{ 'data-testid': 'settings-general-row-label' }"
+                        control-class="ml-auto w-[180px]"
+                        :control-attrs="{ 'data-testid': 'settings-general-control' }"
                     >
-                        <label
-                            data-testid="settings-general-row-label"
-                            class="block text-[13px] leading-6 font-normal text-neutral-900"
-                        >
-                            {{ t('settings.general.windowSize') }}
-                        </label>
-                        <div data-testid="settings-general-control" class="ml-auto w-[180px]">
-                            <CustomSelect
-                                v-model="settings.searchWindowSizePreset"
-                                :options="searchWindowSizeOptions"
-                                @update:model-value="saveSearchWindowSizePreset"
-                            />
-                        </div>
-                    </div>
+                        <CustomSelect
+                            v-model="settings.searchWindowSizePreset"
+                            :options="searchWindowSizeOptions"
+                            @update:model-value="saveSearchWindowSizePreset"
+                        />
+                    </SettingsRow>
                 </div>
             </section>
 
@@ -291,24 +260,22 @@
                 </div>
 
                 <div data-testid="settings-general-card-conversation" class="settings-row-group">
-                    <div
+                    <SettingsRow
                         data-settings-search-target="output-scroll"
-                        class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_180px] sm:items-center"
+                        control-width="180"
+                        label-as="label"
+                        label-class="block"
+                        :label="t('settings.general.outputScrollBehavior')"
+                        :label-attrs="{ 'data-testid': 'settings-general-row-label' }"
+                        control-class="ml-auto w-[180px]"
+                        :control-attrs="{ 'data-testid': 'settings-general-control' }"
                     >
-                        <label
-                            data-testid="settings-general-row-label"
-                            class="block text-[13px] leading-6 font-normal text-neutral-900"
-                        >
-                            {{ t('settings.general.outputScrollBehavior') }}
-                        </label>
-                        <div data-testid="settings-general-control" class="ml-auto w-[180px]">
-                            <CustomSelect
-                                v-model="settings.outputScrollBehavior"
-                                :options="outputScrollBehaviorOptions"
-                                @update:model-value="saveOutputScrollBehavior"
-                            />
-                        </div>
-                    </div>
+                        <CustomSelect
+                            v-model="settings.outputScrollBehavior"
+                            :options="outputScrollBehaviorOptions"
+                            @update:model-value="saveOutputScrollBehavior"
+                        />
+                    </SettingsRow>
                 </div>
             </section>
 
@@ -321,25 +288,23 @@
                 </div>
 
                 <div data-testid="settings-language-section" class="settings-row-group">
-                    <div
+                    <SettingsRow
                         data-settings-search-target="language"
-                        class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_180px] sm:items-center"
+                        control-width="180"
+                        label-as="label"
+                        label-class="block"
+                        :label="t('settings.general.interfaceLanguage')"
+                        :label-attrs="{ 'data-testid': 'settings-general-row-label' }"
+                        control-class="ml-auto w-[180px]"
+                        :control-attrs="{ 'data-testid': 'settings-general-control' }"
                     >
-                        <label
-                            data-testid="settings-general-row-label"
-                            class="block text-[13px] leading-6 font-normal text-neutral-900"
-                        >
-                            {{ t('settings.general.interfaceLanguage') }}
-                        </label>
-                        <div data-testid="settings-general-control" class="ml-auto w-[180px]">
-                            <CustomSelect
-                                v-model="pendingLanguage"
-                                :options="languageOptions"
-                                protect-option-text
-                                @update:model-value="saveLanguage"
-                            />
-                        </div>
-                    </div>
+                        <CustomSelect
+                            v-model="pendingLanguage"
+                            :options="languageOptions"
+                            protect-option-text
+                            @update:model-value="saveLanguage"
+                        />
+                    </SettingsRow>
                 </div>
             </section>
 

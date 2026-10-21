@@ -1,6 +1,9 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
     import CustomSelect from '@components/CustomSelect.vue';
     import PasswordInput from '@components/PasswordInput.vue';
+    import SettingsRow from '@components/SettingsRow.vue';
+    import { Input } from '@components/ui/input';
+    import { Switch } from '@components/ui/switch';
     import { findBuiltInToolByToolId, updateBuiltInTool } from '@database/queries';
     import { storeToRefs } from 'pinia';
     import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
@@ -430,95 +433,69 @@
                         {{ t('settings.search.description') }}
                     </p>
                 </div>
-                <button
-                    type="button"
+                <Switch
+                    size="lg"
+                    class="ml-auto shrink-0"
                     data-testid="search-enabled-toggle"
                     :aria-label="t('settings.search.title')"
-                    :aria-pressed="toolEnabled"
+                    :model-value="toolEnabled"
                     :disabled="savingToolEnabled"
-                    :class="[
-                        't-toggle-track relative ml-auto inline-flex h-5 w-9 shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50',
-                        toolEnabled ? 'settings-toggle-enabled' : 'bg-neutral-200',
-                    ]"
-                    @click="toggleToolEnabled"
-                >
-                    <span
-                        :class="[
-                            't-toggle-thumb inline-block h-3.5 w-3.5 transform rounded-full bg-white',
-                            toolEnabled ? 'translate-x-[18px]' : 'translate-x-1',
-                        ]"
-                    />
-                </button>
+                    @update:model-value="toggleToolEnabled"
+                />
             </header>
 
             <fieldset :disabled="!toolEnabled" class="contents">
                 <section class="space-y-4">
                     <h2 class="settings-section-title">{{ t('settings.search.section.basic') }}</h2>
                     <div class="settings-row-group divide-y divide-neutral-200/70">
-                        <div
+                        <SettingsRow
                             data-settings-search-target="search-default-provider"
-                            class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_320px] sm:items-center"
+                            control-width="320"
+                            :label="t('settings.search.defaultProvider')"
+                            :description="t('settings.search.defaultProvider.description')"
                         >
-                            <div>
-                                <div class="text-[13px] leading-6 font-normal text-neutral-900">
-                                    {{ t('settings.search.defaultProvider') }}
-                                </div>
-                                <div class="mt-1 text-xs text-neutral-500">
-                                    {{ t('settings.search.defaultProvider.description') }}
-                                </div>
-                            </div>
                             <CustomSelect
                                 v-model="draft.defaultProvider"
                                 :options="providerOptions"
                                 :disabled="!toolEnabled"
                             />
-                        </div>
+                        </SettingsRow>
 
-                        <div
+                        <SettingsRow
                             data-settings-search-target="search-max-results"
-                            class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_320px] sm:items-center"
+                            control-width="320"
+                            :label="t('settings.search.maxResults')"
+                            :description="t('settings.search.maxResults.description')"
                         >
-                            <div>
-                                <div class="text-[13px] leading-6 font-normal text-neutral-900">
-                                    {{ t('settings.search.maxResults') }}
-                                </div>
-                                <div class="mt-1 text-xs text-neutral-500">
-                                    {{ t('settings.search.maxResults.description') }}
-                                </div>
-                            </div>
-                            <input
+                            <Input
                                 v-model.number="draft.maxResults"
+                                variant="filled"
                                 data-testid="search-max-results-input"
                                 type="number"
                                 min="1"
                                 max="10"
-                                class="settings-input w-full disabled:bg-neutral-50"
+                                class="w-full disabled:bg-neutral-50"
                                 :disabled="!toolEnabled"
                             />
-                        </div>
+                        </SettingsRow>
 
-                        <div
+                        <SettingsRow
                             data-settings-search-target="search-timeout"
-                            class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_320px] sm:items-center"
+                            control-width="320"
+                            :label="t('settings.search.timeout')"
+                            :description="t('settings.search.timeout.description')"
                         >
-                            <div>
-                                <div class="text-[13px] leading-6 font-normal text-neutral-900">
-                                    {{ t('settings.search.timeout') }}
-                                </div>
-                                <div class="mt-1 text-xs text-neutral-500">
-                                    {{ t('settings.search.timeout.description') }}
-                                </div>
-                            </div>
-                            <input
+                            <Input
                                 v-model.number="draft.timeoutMs"
+                                variant="filled"
                                 type="number"
                                 min="1000"
                                 max="60000"
                                 step="1000"
-                                class="settings-input w-full disabled:bg-neutral-50"
+                                class="w-full disabled:bg-neutral-50"
                                 :disabled="!toolEnabled"
                             />
-                        </div>
+                        </SettingsRow>
                     </div>
                 </section>
 
@@ -527,103 +504,82 @@
                         {{ t('settings.search.section.provider') }}
                     </h2>
                     <div class="settings-row-group divide-y divide-neutral-200/70">
-                        <div
+                        <SettingsRow
                             v-for="provider in providerRows"
                             :key="provider.id"
                             data-testid="search-provider-row"
-                            class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_320px] sm:items-center"
+                            control-width="320"
+                            :description="provider.description"
+                            label-class="flex flex-wrap items-center gap-2"
                         >
-                            <div>
-                                <div
-                                    class="flex min-w-0 flex-wrap items-center gap-2 text-[13px] leading-6 font-normal text-neutral-900"
+                            <template #label>
+                                <span class="min-w-0 truncate">{{ provider.label }}</span>
+                                <span
+                                    v-if="provider.quotaLabel"
+                                    :data-testid="`search-provider-quota-${provider.id}`"
+                                    class="shrink-0 rounded border border-neutral-300 bg-white px-1 py-0.5 text-[9px] leading-none whitespace-nowrap text-neutral-600 shadow-sm"
                                 >
-                                    <span class="min-w-0 truncate">{{ provider.label }}</span>
-                                    <span
-                                        v-if="provider.quotaLabel"
-                                        :data-testid="`search-provider-quota-${provider.id}`"
-                                        class="shrink-0 rounded border border-neutral-300 bg-white px-1 py-0.5 text-[9px] leading-none whitespace-nowrap text-neutral-600 shadow-sm"
-                                    >
-                                        {{ provider.quotaLabel }}
-                                    </span>
-                                </div>
-                                <div class="mt-1 text-xs text-neutral-500">
-                                    {{ provider.description }}
-                                </div>
-                            </div>
-                            <div class="min-w-0">
-                                <div class="flex min-w-0 items-center gap-2">
-                                    <button
-                                        type="button"
-                                        :data-testid="`search-provider-toggle-${provider.id}`"
-                                        :aria-label="provider.label"
-                                        :aria-pressed="providerConfig(provider.id).enabled"
-                                        :class="[
-                                            't-toggle-track relative inline-flex h-5 w-9 shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50',
-                                            providerConfig(provider.id).enabled
-                                                ? 'settings-toggle-enabled'
-                                                : 'bg-neutral-200',
-                                        ]"
-                                        :disabled="!toolEnabled"
-                                        @click="
-                                            updateProviderEnabled(
-                                                provider.id,
-                                                !providerConfig(provider.id).enabled
-                                            )
-                                        "
-                                    >
-                                        <span
-                                            :class="[
-                                                't-toggle-thumb inline-block h-3.5 w-3.5 transform rounded-full bg-white',
-                                                providerConfig(provider.id).enabled
-                                                    ? 'translate-x-[18px]'
-                                                    : 'translate-x-1',
-                                            ]"
-                                        />
-                                    </button>
-                                    <input
-                                        v-if="providerRequiresEndpoint(provider.id)"
-                                        :value="providerCredentialValue(provider.id)"
-                                        :data-testid="`search-${provider.id}-api-key-input`"
-                                        class="focus:border-primary-300 min-w-0 flex-1 rounded-[10px] border border-transparent bg-[#f0f0ef] px-3 py-2 font-serif text-[13px] text-neutral-900 shadow-none transition-colors placeholder:text-neutral-400 hover:bg-[#ececea] focus:bg-white disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-gray-400"
-                                        :class="
-                                            shouldHighlightProviderApiKey(provider.id)
-                                                ? 'border-red-300 bg-red-50 text-red-600'
-                                                : ''
-                                        "
+                                    {{ provider.quotaLabel }}
+                                </span>
+                            </template>
+                            <div class="flex items-center gap-2">
+                                <Switch
+                                    size="lg"
+                                    class="shrink-0"
+                                    :data-testid="`search-provider-toggle-${provider.id}`"
+                                    :aria-label="provider.label"
+                                    :model-value="providerConfig(provider.id).enabled"
+                                    :disabled="!toolEnabled"
+                                    @update:model-value="
+                                        updateProviderEnabled(
+                                            provider.id,
+                                            !providerConfig(provider.id).enabled
+                                        )
+                                    "
+                                />
+                                <input
+                                    v-if="providerRequiresEndpoint(provider.id)"
+                                    :value="providerCredentialValue(provider.id)"
+                                    :data-testid="`search-${provider.id}-api-key-input`"
+                                    class="focus:border-primary-300 min-w-0 flex-1 rounded-[10px] border border-transparent bg-[#f0f0ef] px-3 py-2 font-serif text-[13px] text-neutral-900 shadow-none transition-colors placeholder:text-neutral-400 hover:bg-[#ececea] focus:bg-white disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-gray-400"
+                                    :class="
+                                        shouldHighlightProviderApiKey(provider.id)
+                                            ? 'border-red-300 bg-red-50 text-red-600'
+                                            : ''
+                                    "
+                                    :placeholder="provider.keyPlaceholder"
+                                    :disabled="!canEditProviderApiKey(provider.id)"
+                                    type="url"
+                                    spellcheck="false"
+                                    @input="
+                                        updateProviderCredential(
+                                            provider.id,
+                                            ($event.target as HTMLInputElement).value
+                                        )
+                                    "
+                                />
+                                <div v-else class="min-w-0 flex-1">
+                                    <PasswordInput
+                                        :model-value="providerCredentialValue(provider.id)"
                                         :placeholder="provider.keyPlaceholder"
                                         :disabled="!canEditProviderApiKey(provider.id)"
-                                        type="url"
-                                        spellcheck="false"
-                                        @input="
-                                            updateProviderCredential(
-                                                provider.id,
-                                                ($event.target as HTMLInputElement).value
-                                            )
+                                        class="!mt-0"
+                                        :input-test-id="`search-${provider.id}-api-key-input`"
+                                        :input-class="
+                                            [
+                                                'h-auto rounded-[10px] border-transparent bg-[#f0f0ef] px-3 py-2 pr-10 text-[13px] text-neutral-900 shadow-none hover:bg-[#ececea] focus:border-primary-300 focus:bg-white disabled:bg-neutral-50 disabled:text-gray-400',
+                                                shouldHighlightProviderApiKey(provider.id)
+                                                    ? 'border-red-300 bg-red-50 text-red-600'
+                                                    : '',
+                                            ].join(' ')
+                                        "
+                                        @update:model-value="
+                                            updateProviderCredential(provider.id, $event)
                                         "
                                     />
-                                    <div v-else class="min-w-0 flex-1">
-                                        <PasswordInput
-                                            :model-value="providerCredentialValue(provider.id)"
-                                            :placeholder="provider.keyPlaceholder"
-                                            :disabled="!canEditProviderApiKey(provider.id)"
-                                            class="!mt-0"
-                                            :input-test-id="`search-${provider.id}-api-key-input`"
-                                            :input-class="
-                                                [
-                                                    'h-auto rounded-[10px] border-transparent bg-[#f0f0ef] px-3 py-2 pr-10 text-[13px] text-neutral-900 shadow-none hover:bg-[#ececea] focus:border-primary-300 focus:bg-white disabled:bg-neutral-50 disabled:text-gray-400',
-                                                    shouldHighlightProviderApiKey(provider.id)
-                                                        ? 'border-red-300 bg-red-50 text-red-600'
-                                                        : '',
-                                                ].join(' ')
-                                            "
-                                            @update:model-value="
-                                                updateProviderCredential(provider.id, $event)
-                                            "
-                                        />
-                                    </div>
                                 </div>
                             </div>
-                        </div>
+                        </SettingsRow>
                     </div>
                 </section>
 
@@ -632,19 +588,13 @@
                         {{ t('settings.search.section.routing') }}
                     </h2>
                     <div class="settings-row-group divide-y divide-neutral-200/70">
-                        <div
+                        <SettingsRow
                             v-for="row in routeRows"
                             :key="row.intent"
-                            class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_320px] sm:items-center"
+                            control-width="320"
+                            :label="row.label"
+                            :description="row.description"
                         >
-                            <div>
-                                <div class="text-[13px] leading-6 font-normal text-neutral-900">
-                                    {{ row.label }}
-                                </div>
-                                <div class="mt-1 text-xs text-neutral-500">
-                                    {{ row.description }}
-                                </div>
-                            </div>
                             <CustomSelect
                                 :model-value="routeValue(row.intent)"
                                 :options="enabledProviderOptions"
@@ -653,7 +603,7 @@
                                     updateRoute(row.intent, $event as SearchProviderId)
                                 "
                             />
-                        </div>
+                        </SettingsRow>
                     </div>
                 </section>
 
@@ -662,40 +612,24 @@
                         {{ t('settings.search.section.advanced') }}
                     </h2>
                     <div class="settings-row-group divide-y divide-neutral-200/70">
-                        <div
+                        <SettingsRow
                             v-for="row in advancedRows"
                             :key="row.key"
                             :data-settings-search-target="`search-${row.key}`"
-                            class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_320px] sm:items-center"
+                            control-width="320"
+                            :label="row.label"
+                            :description="row.description"
                         >
-                            <div>
-                                <div class="text-[13px] leading-6 font-normal text-neutral-900">
-                                    {{ row.label }}
-                                </div>
-                                <div class="mt-1 text-xs text-neutral-500">
-                                    {{ row.description }}
-                                </div>
-                            </div>
-                            <button
-                                type="button"
+                            <Switch
+                                size="lg"
+                                class="ml-auto shrink-0"
                                 :data-testid="`search-advanced-toggle-${row.key}`"
                                 :aria-label="row.label"
-                                :aria-pressed="draft[row.key]"
-                                :class="[
-                                    't-toggle-track relative ml-auto inline-flex h-5 w-9 shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50',
-                                    draft[row.key] ? 'settings-toggle-enabled' : 'bg-neutral-200',
-                                ]"
+                                :model-value="draft[row.key]"
                                 :disabled="!toolEnabled"
-                                @click="draft[row.key] = !draft[row.key]"
-                            >
-                                <span
-                                    :class="[
-                                        't-toggle-thumb inline-block h-3.5 w-3.5 transform rounded-full bg-white',
-                                        draft[row.key] ? 'translate-x-[18px]' : 'translate-x-1',
-                                    ]"
-                                />
-                            </button>
-                        </div>
+                                @update:model-value="draft[row.key] = !draft[row.key]"
+                            />
+                        </SettingsRow>
                     </div>
                 </section>
             </fieldset>

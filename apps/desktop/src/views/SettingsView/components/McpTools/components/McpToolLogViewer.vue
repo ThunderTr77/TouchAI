@@ -3,6 +3,8 @@
 <script setup lang="ts">
     import AppIcon from '@components/AppIcon.vue';
     import EmptyState from '@components/EmptyState.vue';
+    import { Button } from '@components/ui/button';
+    import { Input } from '@components/ui/input';
     import { useListFilter } from '@composables/useListFilter';
     import { findMcpToolLogsByServerId } from '@database/queries';
     import type { McpServerEntity, McpToolLogEntity } from '@database/types';
@@ -106,11 +108,12 @@
 
                 <!-- 搜索框 -->
                 <div class="relative min-w-[16rem] flex-1" data-testid="mcp-tool-log-search">
-                    <input
+                    <Input
                         v-model="searchQuery"
+                        variant="filled"
                         type="text"
                         :placeholder="t('toolLog.searchPlaceholder')"
-                        class="settings-input w-full py-1.5 pr-3 pl-9"
+                        class="w-full py-1.5 pr-3 pl-9"
                     />
                     <AppIcon
                         name="search"
@@ -134,13 +137,9 @@
                     icon="document-text"
                 >
                     <template v-if="hasActiveFilters" #actions>
-                        <button
-                            type="button"
-                            class="settings-button-secondary"
-                            @click="resetFilters"
-                        >
+                        <Button variant="outline-neutral" @click="resetFilters">
                             {{ t('common.clearFilters') }}
-                        </button>
+                        </Button>
                     </template>
                 </EmptyState>
             </div>
@@ -162,13 +161,9 @@
 
                 <!-- 加载更多 -->
                 <div v-if="hasMore" class="pt-2 text-center">
-                    <button
-                        :disabled="loadingMore"
-                        class="settings-button-secondary"
-                        @click="loadMore"
-                    >
+                    <Button variant="outline-neutral" :disabled="loadingMore" @click="loadMore">
                         {{ loadingMore ? t('common.loading') : t('common.loadMore') }}
-                    </button>
+                    </Button>
                 </div>
             </div>
         </div>

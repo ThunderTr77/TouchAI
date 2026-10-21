@@ -4,6 +4,9 @@
     import AppIcon from '@components/AppIcon.vue';
     import EmptyState from '@components/EmptyState.vue';
     import MotionCollapse from '@components/MotionCollapse.vue';
+    import { Button } from '@components/ui/button';
+    import { Input } from '@components/ui/input';
+    import { Switch } from '@components/ui/switch';
     import { useListFilter } from '@composables/useListFilter';
     import { updateMcpTool } from '@database/queries';
     import type { McpServerEntity, McpToolEntity } from '@database/types';
@@ -59,8 +62,7 @@
         }
     };
 
-    const toggleEnabled = async (tool: McpToolEntity, event: Event) => {
-        event.stopPropagation();
+    const toggleEnabled = async (tool: McpToolEntity) => {
         try {
             await updateMcpTool(tool.id, {
                 enabled: tool.enabled ? 0 : 1,
@@ -154,11 +156,12 @@
 
                 <!-- 搜索框 -->
                 <div class="relative w-64">
-                    <input
+                    <Input
                         v-model="searchQuery"
+                        variant="filled"
                         type="text"
                         :placeholder="t('settings.mcp.tools.searchPlaceholder')"
-                        class="settings-input w-full py-1.5 pr-3 pl-9"
+                        class="w-full py-1.5 pr-3 pl-9"
                     />
                     <AppIcon
                         name="search"
@@ -186,13 +189,9 @@
                     icon="mcp"
                 >
                     <template v-if="hasActiveFilters" #actions>
-                        <button
-                            type="button"
-                            class="settings-button-secondary"
-                            @click="resetFilters"
-                        >
+                        <Button variant="outline-neutral" @click="resetFilters">
                             {{ t('common.clearFilters') }}
-                        </button>
+                        </Button>
                     </template>
                 </EmptyState>
             </div>
@@ -218,20 +217,11 @@
                                     >
                                         {{ tool.name }}
                                     </h3>
-                                    <button
-                                        :class="[
-                                            't-toggle-track relative inline-flex h-5 w-9 items-center rounded-full',
-                                            tool.enabled ? 'bg-primary-700' : 'bg-neutral-200',
-                                        ]"
-                                        @click="toggleEnabled(tool, $event)"
-                                    >
-                                        <span
-                                            :class="[
-                                                't-toggle-thumb inline-block h-3 w-3 transform rounded-full bg-white',
-                                                tool.enabled ? 'translate-x-5' : 'translate-x-1',
-                                            ]"
-                                        />
-                                    </button>
+                                    <Switch
+                                        size="sm"
+                                        :model-value="tool.enabled === 1"
+                                        @update:model-value="toggleEnabled(tool)"
+                                    />
                                 </div>
                                 <p
                                     v-if="tool.description"

@@ -1,5 +1,7 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
     import CustomSelect from '@components/CustomSelect.vue';
+    import SettingsRow from '@components/SettingsRow.vue';
+    import { Switch } from '@components/ui/switch';
     import { appUpdateService } from '@services/AppUpdateService';
     import { getAvailableAppUpdateVersion } from '@services/AppUpdateService/availability';
     import type { AppUpdateChannel } from '@services/AppUpdateService/types';
@@ -264,66 +266,45 @@
         </div>
 
         <div class="settings-row-group divide-y divide-neutral-200/70">
-            <div
+            <SettingsRow
                 data-settings-search-target="update-channel"
-                class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_180px] sm:items-center"
+                control-width="180"
+                label-as="label"
+                label-class="block"
+                :label="t('settings.general.update.channelRowLabel')"
+                :label-attrs="{ 'data-testid': 'settings-general-row-label' }"
+                control-class="ml-auto w-[180px]"
+                :control-attrs="{ 'data-testid': 'settings-general-control' }"
             >
-                <label
-                    data-testid="settings-general-row-label"
-                    class="block text-[13px] leading-6 font-normal text-neutral-900"
-                >
-                    {{ t('settings.general.update.channelRowLabel') }}
-                </label>
-                <div data-testid="settings-general-control" class="ml-auto w-[180px]">
-                    <CustomSelect
-                        :model-value="updateState.channel"
-                        :options="channelOptions"
-                        :disabled="isBusy"
-                        @update:model-value="selectUpdateChannel"
-                    />
-                </div>
-            </div>
-
-            <div
-                data-settings-search-target="update-auto-check"
-                class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
-            >
-                <div
-                    data-testid="settings-general-row-label"
-                    class="text-[13px] leading-6 font-normal text-neutral-900"
-                >
-                    {{ t('settings.general.update.autoCheck') }}
-                </div>
-                <button
-                    type="button"
-                    :class="[
-                        't-toggle-track relative inline-flex h-5 w-9 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-50',
-                        updateState.autoCheckEnabled ? 'settings-toggle-enabled' : 'bg-neutral-200',
-                    ]"
-                    data-testid="settings-update-auto-check-toggle"
-                    :aria-pressed="updateState.autoCheckEnabled"
+                <CustomSelect
+                    :model-value="updateState.channel"
+                    :options="channelOptions"
                     :disabled="isBusy"
-                    @click="toggleAutoCheck"
-                >
-                    <span
-                        :class="[
-                            't-toggle-thumb inline-block h-3.5 w-3.5 transform rounded-full bg-white',
-                            updateState.autoCheckEnabled ? 'translate-x-[18px]' : 'translate-x-1',
-                        ]"
-                    />
-                </button>
-            </div>
+                    @update:model-value="selectUpdateChannel"
+                />
+            </SettingsRow>
 
-            <div
-                class="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+            <SettingsRow
+                data-settings-search-target="update-auto-check"
+                control-width="auto"
+                :label="t('settings.general.update.autoCheck')"
+                :label-attrs="{ 'data-testid': 'settings-general-row-label' }"
             >
-                <div class="min-w-0">
-                    <div
-                        data-testid="settings-update-status-title"
-                        class="text-[13px] leading-6 font-normal text-neutral-900"
-                    >
-                        {{ statusTitle }}
-                    </div>
+                <Switch
+                    size="lg"
+                    data-testid="settings-update-auto-check-toggle"
+                    :model-value="updateState.autoCheckEnabled"
+                    :disabled="isBusy"
+                    @update:model-value="toggleAutoCheck"
+                />
+            </SettingsRow>
+
+            <SettingsRow
+                control-width="auto"
+                :label="statusTitle"
+                :label-attrs="{ 'data-testid': 'settings-update-status-title' }"
+            >
+                <template #description>
                     <div
                         v-if="statusDescription"
                         class="mt-0.5 text-[12px] leading-5 text-neutral-500"
@@ -336,8 +317,7 @@
                     >
                         {{ updateState.error }}
                     </div>
-                </div>
-
+                </template>
                 <button
                     type="button"
                     class="ml-auto inline-flex h-9 min-w-[88px] items-center justify-center rounded-[10px] border border-transparent bg-[#f0f0ef] px-3 text-[12px] font-normal text-neutral-800 transition-colors hover:bg-[#ececea] disabled:cursor-not-allowed disabled:opacity-50"
@@ -347,7 +327,7 @@
                 >
                     {{ t('settings.general.update.action.check') }}
                 </button>
-            </div>
+            </SettingsRow>
         </div>
 
         <UpdateDetailsDialog

@@ -4,10 +4,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { setLocale } from '@/i18n';
 import { createDomLocalizer } from '@/i18n/domLocalizer';
-import AddProviderDialog from '@/views/SettingsView/components/AiServices/components/AddProviderDialog.vue';
-import EditProviderDialog from '@/views/SettingsView/components/AiServices/components/EditProviderDialog.vue';
 import ModelList from '@/views/SettingsView/components/AiServices/components/ModelList.vue';
 import ProviderConfig from '@/views/SettingsView/components/AiServices/components/ProviderConfig.vue';
+import ProviderFormDialog from '@/views/SettingsView/components/AiServices/components/ProviderFormDialog.vue';
 import ProviderList from '@/views/SettingsView/components/AiServices/components/ProviderList.vue';
 
 const { alertErrorMock, alertWarningMock } = vi.hoisted(() => ({
@@ -88,17 +87,10 @@ vi.mock('@components/ui/input', () => ({
     },
 }));
 
-vi.mock('@/views/SettingsView/components/AiServices/components/AddModelDialog.vue', () => ({
+vi.mock('@/views/SettingsView/components/AiServices/components/ModelFormDialog.vue', () => ({
     default: {
-        name: 'AddModelDialog',
-        template: '<section data-testid="add-model-dialog" />',
-    },
-}));
-
-vi.mock('@/views/SettingsView/components/AiServices/components/EditModelDialog.vue', () => ({
-    default: {
-        name: 'EditModelDialog',
-        template: '<section data-testid="edit-model-dialog" />',
+        name: 'ModelFormDialog',
+        template: '<section data-testid="model-form-dialog" />',
     },
 }));
 
@@ -205,7 +197,10 @@ describe('AiServices i18n and layout', () => {
         expect(wrapper.text()).toContain('Default');
         expect(wrapper.text()).not.toContain('大模型服务');
 
-        const addButton = wrapper.get('button');
+        // 用 data-testid 精确定位「添加服务商」按钮。
+        // 不能用 wrapper.get('button')：ProviderCard 里的 Switch 也渲染成 <button>，
+        // 且 DOM 顺序在它之前。
+        const addButton = wrapper.get('[data-testid="settings-add-custom-provider-button"]');
         expect(addButton.classes()).toContain('whitespace-normal');
         expect(addButton.classes()).toContain('break-words');
     });
@@ -321,7 +316,7 @@ describe('AiServices i18n and layout', () => {
     it('renders add-provider dialog labels, validation, and preview in English', async () => {
         setLocale('en-US');
 
-        const wrapper = mount(AddProviderDialog);
+        const wrapper = mount(ProviderFormDialog, { props: { mode: 'create' } });
 
         expect(wrapper.text()).toContain('Add custom provider');
         expect(wrapper.text()).toContain('Provider name *');
@@ -337,8 +332,9 @@ describe('AiServices i18n and layout', () => {
     it('renders edit-provider dialog labels, placeholder, validation, and preview in English', async () => {
         setLocale('en-US');
 
-        const wrapper = mount(EditProviderDialog, {
+        const wrapper = mount(ProviderFormDialog, {
             props: {
+                mode: 'edit',
                 provider: createProvider({ name: '   ' }),
             },
         });

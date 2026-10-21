@@ -5,6 +5,7 @@
 <script setup lang="ts">
     import AppIcon from '@components/AppIcon.vue';
     import LoadingState from '@components/LoadingState.vue';
+    import { Button } from '@components/ui/button';
     import { useAlert } from '@composables/useAlert.ts';
     import { useContextMenu } from '@composables/useContextMenu.ts';
     import { useScrollbarStabilizer } from '@composables/useScrollbarStabilizer';
@@ -40,11 +41,10 @@
         name: 'SettingsAiServicesSection',
     });
 
-    import AddProviderDialog from './components/AddProviderDialog.vue';
     import BadgedLogo from './components/BadgedLogo.vue';
-    import EditProviderDialog from './components/EditProviderDialog.vue';
     import ModelList from './components/ModelList.vue';
     import ProviderConfig from './components/ProviderConfig.vue';
+    import ProviderFormDialog from './components/ProviderFormDialog.vue';
     import ProviderList from './components/ProviderList.vue';
 
     const alert = useAlert();
@@ -754,9 +754,9 @@
                 <div class="settings-card text-neutral-600">
                     <p class="font-medium text-neutral-950">{{ t('settings.ai.loadFailed') }}</p>
                     <p class="mt-1 text-sm">{{ error }}</p>
-                    <button class="settings-button-primary mt-4" @click="() => loadProviders()">
+                    <Button variant="strong" class="mt-4" @click="() => loadProviders()">
                         {{ t('common.retry') }}
-                    </button>
+                    </Button>
                 </div>
             </div>
 
@@ -798,15 +798,15 @@
                         </div>
 
                         <div class="flex items-center gap-3">
-                            <button
+                            <Button
                                 v-if="!selectedProvider.is_builtin"
+                                variant="ghost-neutral"
                                 data-testid="settings-provider-edit-button"
-                                class="settings-icon-button"
                                 :title="t('settings.ai.editProvider.title')"
                                 @click="handleEditProvider"
                             >
                                 <AppIcon name="edit" class="h-5 w-5" />
-                            </button>
+                            </Button>
                         </div>
                     </div>
 
@@ -836,16 +836,18 @@
             </div>
         </div>
 
-        <AddProviderDialog
+        <ProviderFormDialog
             v-if="isAddDialogMounted"
+            mode="create"
             :open="showAddDialog"
             @create="handleCreateProvider"
             @cancel="showAddDialog = false"
             @closed="handleAddDialogClosed"
         />
 
-        <EditProviderDialog
+        <ProviderFormDialog
             v-if="isEditDialogMounted && editingProvider"
+            mode="edit"
             :open="showEditDialog"
             :provider="editingProvider"
             @update="handleUpdateProviderInfo"

@@ -3,6 +3,8 @@
 <script setup lang="ts">
     import AppIcon from '@components/AppIcon.vue';
     import EmptyState from '@components/EmptyState.vue';
+    import { Button } from '@components/ui/button';
+    import { Input } from '@components/ui/input';
     import { useAlert } from '@composables/useAlert';
     import { useMotion } from '@composables/useMotion';
     import type { Model, NewModel, Provider } from '@database/schema';
@@ -10,8 +12,7 @@
 
     import { t, tp } from '@/i18n';
 
-    import AddModelDialog from './AddModelDialog.vue';
-    import EditModelDialog from './EditModelDialog.vue';
+    import ModelFormDialog from './ModelFormDialog.vue';
     import ModelGroup from './ModelGroup.vue';
     interface Props {
         providerId: number;
@@ -268,11 +269,12 @@
                         name="search"
                         class="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-neutral-400"
                     />
-                    <input
+                    <Input
                         v-model="searchQuery"
+                        variant="filled"
                         type="text"
                         :placeholder="searchPlaceholder"
-                        class="settings-input w-full py-1.5 pr-3 pl-9"
+                        class="w-full py-1.5 pr-3 pl-9"
                     />
                 </div>
             </div>
@@ -296,12 +298,9 @@
                     </span>
                     <span v-else>{{ t('settings.ai.refresh') }}</span>
                 </button>
-                <button
-                    class="settings-button-primary flex-shrink-0 px-3 py-1.5"
-                    @click="startCreate"
-                >
+                <Button variant="strong" class="flex-shrink-0 px-3 py-1.5" @click="startCreate">
                     {{ t('settings.ai.addModelTitle') }}
-                </button>
+                </Button>
             </div>
         </div>
 
@@ -311,13 +310,9 @@
                     {{ t('settings.ai.noMatchingModelsDescription', { query: searchQuery }) }}
                 </template>
                 <template #actions>
-                    <button
-                        type="button"
-                        class="settings-button-secondary"
-                        @click="searchQuery = ''"
-                    >
+                    <Button variant="outline-neutral" @click="searchQuery = ''">
                         {{ t('common.clearSearch') }}
-                    </button>
+                    </Button>
                 </template>
             </EmptyState>
         </div>
@@ -334,9 +329,9 @@
             icon="llm"
         >
             <template #actions>
-                <button
-                    type="button"
-                    class="settings-button-primary inline-flex items-center gap-1.5"
+                <Button
+                    variant="strong"
+                    class="inline-flex items-center gap-1.5"
                     :disabled="refreshing || !provider?.api_endpoint"
                     @click="handleRefresh"
                 >
@@ -348,10 +343,10 @@
                     {{
                         refreshing ? t('settings.ai.fetchingModels') : t('settings.ai.fetchModels')
                     }}
-                </button>
-                <button type="button" class="settings-button-secondary" @click="startCreate">
+                </Button>
+                <Button variant="outline-neutral" @click="startCreate">
                     {{ t('settings.ai.addManually') }}
-                </button>
+                </Button>
             </template>
         </EmptyState>
 
@@ -369,8 +364,9 @@
             />
         </div>
 
-        <AddModelDialog
+        <ModelFormDialog
             v-if="isAddDialogMounted"
+            mode="create"
             :open="showAddDialog"
             :provider-id="providerId"
             @create="handleCreate"
@@ -378,8 +374,9 @@
             @closed="handleAddDialogClosed"
         />
 
-        <EditModelDialog
+        <ModelFormDialog
             v-if="editingModel"
+            mode="edit"
             :open="showEditDialog"
             :model="editingModel"
             @update="handleUpdate"
