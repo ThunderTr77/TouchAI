@@ -36,7 +36,11 @@ import {
     getSearchProviderAdapter,
     isConfiguredSearchProvider,
 } from './providers/adapters';
-import { type WebSearchFetchJson, WebSearchHttpError } from './providers/types';
+import {
+    type WebSearchFetchJson,
+    type WebSearchFetchText,
+    WebSearchHttpError,
+} from './providers/types';
 import { webSearchHostname, type WebSearchSourcesPayload } from './sources';
 
 const tauriFetch = createTauriFetch();
@@ -162,14 +166,28 @@ function parseRetryAfterMs(value: string | null): number | undefined {
     return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
 }
 
-const fetchJson: WebSearchFetchJson = async (url, signal, init = {}) => {
+const SEARCH_REQUEST_HEADERS = {
+    'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+};
+
+/** 发请求并把非 2xx 统一转成可判定重试的 `WebSearchHttpError`。 */
+async function requestSearchResponse(
+    url: URL,
+    signal: AbortSignal,
+    init: {
+        method?: 'GET' | 'POST';
+        headers?: Record<string, string>;
+        body?: string;
+    },
+    defaultHeaders: Record<string, string> = {}
+): Promise<Response> {
     const response = await tauriFetch(url.toString(), {
         method: init.method ?? 'GET',
         headers: {
-            Accept: 'application/json',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-            'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            ...defaultHeaders,
+            ...SEARCH_REQUEST_HEADERS,
             ...(init.headers ?? {}),
         },
         body: init.body,
@@ -182,7 +200,19 @@ const fetchJson: WebSearchFetchJson = async (url, signal, init = {}) => {
         });
     }
 
+    return response;
+}
+
+const fetchJson: WebSearchFetchJson = async (url, signal, init = {}) => {
+    const response = await requestSearchResponse(url, signal, init, {
+        Accept: 'application/json',
+    });
     return await response.json();
+};
+
+const fetchText: WebSearchFetchText = async (url, signal, init = {}) => {
+    const response = await requestSearchResponse(url, signal, init);
+    return await response.text();
 };
 
 async function loadSearchSettings(): Promise<SearchSettingsConfig> {
@@ -244,7 +274,7 @@ async function runSearchProvider(
         throw new Error('No enabled search provider is configured.');
     }
 
-    return adapter.search({ request, settings, signal, fetchJson });
+    return adapter.search({ request, settings, signal, fetchJson, fetchText });
 }
 
 function applySearchSettingsDefaults(
