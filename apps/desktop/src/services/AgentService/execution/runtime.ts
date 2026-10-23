@@ -1,6 +1,7 @@
 // Copyright (c) 2026. Qian Cheng. Licensed under GPL v3
 
 import { updateModelLastUsed } from '@database/queries';
+import { findModelPricing } from '@database/queries/llmMetadata';
 import type { SessionTurnEntity } from '@database/types';
 
 import { t } from '@/i18n';
@@ -10,6 +11,7 @@ import {
     getModelAttachmentCapabilities,
     getUnsupportedAttachmentTypes,
 } from '@/services/AgentService/infrastructure/attachments';
+import { LiveUsageTracker } from '@/services/UsageService/liveUsage';
 import type { InputHistorySnapshot } from '@/types/session';
 
 import { AiError, AiErrorCode } from '../contracts/errors';
@@ -37,18 +39,18 @@ import {
 } from './retry';
 
 /**
- * 运行时在真正执行 turn 之前需要的宿主环境。
+ * Host environment the runtime needs before it can run a turn.
  *
- * `execution` 层只消费这些抽象依赖，不直接触碰 UI store、
- * 桌面通知或其他宿主实现。
+ * The `execution` layer consumes only these abstractions and never touches the
+ * UI store, desktop notifications, or any other host implementation.
  */
 export interface ConversationRuntimeEnvironment {
     reportPersistenceIssue?: (issue: RuntimePersistenceIssue) => Promise<void> | void;
 }
 
 /**
- * 持久化相关问题会通过这个结构上抛给外层 output，
- * 由外层决定是否通知用户、写日志或静默忽略。
+ * Persistence problems are raised through this structure to the outer output
+ * layer, which decides whether to notify the user, log, or ignore them.
  */
 export interface RuntimePersistenceIssue {
     phase:
@@ -82,7 +84,7 @@ export function summarizeTaskModel(model: ModelWithProvider): TaskModelSummary {
 }
 
 /**
- * 运行时内部统一事件。
+ * Unified events emitted by the runtime.
  */
 export type TurnEvent =
     | {
@@ -157,7 +159,7 @@ interface RuntimeContext {
 }
 
 /**
- * executor.ts 中的 console 日志保留英文，便于对齐 provider / SDK 调试信息。
+ * console logs in executor.ts stay English so they line up with provider and SDK output.
  */
 function buildPersistenceIssue(
     bodyKey: Parameters<typeof t>[0]
@@ -169,17 +171,19 @@ function buildPersistenceIssue(
 }
 
 /**
- * 管理一次请求的运行时状态与生命周期：
- * - 解析本次请求使用的模型与消息上下文
- * - 初始化持久化、设置快照与开始时间
- * - 调度多次 retry attempt
- * - 统一处理完成、失败、取消收尾
+ * Owns the state and lifecycle of one request:
+ * - resolve the model and message context for this request
+ * - initialise persistence, the settings snapshot, and the start time
+ * - schedule retry attempts
+ * - close out on completion, failure, or cancellation
  *
- * 它不直接执行模型流式 loop，而是把执行工作委托给 AiRequestExecutor。
+ * It does not run the streaming loop itself but delegates to AiRequestExecutor.
  */
 export class AiConversationRuntime {
     private readonly startedAt = Date.now();
     private requestFinalized = false;
+    /** Live usage tracker for the running turn; null before it starts. */
+    private liveTracker: LiveUsageTracker | null = null;
 
     constructor(
         private readonly executor: AiRequestExecutor,
@@ -195,8 +199,9 @@ export class AiConversationRuntime {
     }
 
     /**
-     * 预持久化附件只用于解锁 hash / attachmentId / provider remote ref 复用等增强能力。
-     * 如果这里失败，不应阻断本轮请求；后续仍可直接使用原始文件做 inline 发送。
+     * Pre-persisting attachments only unlocks extras such as hash, attachmentId,
+     * and provider remote ref reuse. A failure here must not block the turn; the
+     * raw files can still be sent inline.
      */
     private async prepareAttachmentsForTransport(attachments: AttachmentIndex[]): Promise<void> {
         const results = await Promise.allSettled(
@@ -245,8 +250,8 @@ export class AiConversationRuntime {
         if (attachments.length > 0) {
             await this.prepareAttachmentsForTransport(attachments);
         }
-        // prompt 快照在整个 turn 生命周期内只生成一次。
-        // 后续 retry、tool iteration、checkpoint resume 都必须复用它。
+        // The prompt snapshot is built once per turn and reused by retries,
+        // tool iterations, and checkpoint resumes.
         const promptSnapshot =
             this.options.promptSnapshot ??
             (await composePromptSnapshot({
@@ -321,10 +326,40 @@ export class AiConversationRuntime {
         };
     }
 
+    /**
+     * Build the live usage tracker.
+     *
+     * Without pricing the cost is left unset: better to show nothing than to
+     * invent a number.
+     */
+    private async createLiveUsageTracker(
+        context: RuntimeContext
+    ): Promise<LiveUsageTracker | null> {
+        if (!this.options.taskId) {
+            return null;
+        }
+
+        const model = context.initialCheckpoint.activeModel;
+
+        try {
+            const pricing = await findModelPricing(model.model_id);
+            return new LiveUsageTracker({
+                taskId: this.options.taskId,
+                sessionId: context.persister.getSessionId() ?? this.options.sessionId ?? null,
+                modelName: model.model_id,
+                estimatedOutputCostPerMillion: pricing ? Number(pricing.outputPerMillion) : null,
+            });
+        } catch (error) {
+            console.warn('[AiConversationRuntime] Failed to prepare live usage tracker:', error);
+            return null;
+        }
+    }
+
     private shouldRetryAttempt(result: AttemptFailureResult, retryAttempt: number): boolean {
-        // 只要错误类型可重试且重试次数未耗尽，即允许重试。
-        // checkpoint 机制已保证从安全状态恢复——自上次 checkpoint 以来的部分流式输出
-        // 和未提交的工具调用不会被重放，由投影器负责处理 UI 侧的内容过渡。
+        // Retry while the error is retryable and attempts remain. Checkpoints
+        // guarantee a safe resume: partial output and uncommitted tool calls
+        // since the last checkpoint are not replayed, and the projector handles
+        // the UI transition.
         return (
             retryAttempt < MAX_REQUEST_RETRIES &&
             shouldRetryRequestFailure(result.error, result.providerErrorDetails)
@@ -364,6 +399,17 @@ export class AiConversationRuntime {
             await context.persister.markCompleted({
                 durationMs: Date.now() - this.startedAt,
                 outputParts: result.finalStepOutputParts,
+                calls: result.calls,
+                ttftMs: result.firstTtftMs,
+                firstTextMs: result.firstTextMs,
+                toolArgumentErrors: result.toolArgumentErrors,
+                modelSwitchCount: result.modelSwitchCount,
+                hitModelSwitchCeiling: result.hitModelSwitchCeiling,
+                tokensUsed:
+                    result.totalUsage.inputTokens +
+                    result.totalUsage.outputTokens +
+                    result.totalUsage.cacheReadTokens +
+                    result.totalUsage.cacheWriteTokens,
             });
         } catch (persistError) {
             console.error('[AiConversationRuntime] Failed to persist completion:', persistError);
@@ -373,6 +419,13 @@ export class AiConversationRuntime {
                 error: persistError,
             });
         }
+
+        // Close out with the measured output tokens so the panel switches from estimate to real.
+        this.liveTracker?.finish({
+            outputTokens: result.totalUsage.outputTokens,
+            costMicros: null,
+        });
+        this.liveTracker = null;
 
         this.requestFinalized = true;
 
@@ -400,7 +453,7 @@ export class AiConversationRuntime {
     }
 
     /**
-     * 执行完整请求生命周期。
+     * Run the full request lifecycle.
      */
     async run(): Promise<ExecuteRequestResult> {
         const context = await this.createRuntimeContext();
@@ -409,13 +462,24 @@ export class AiConversationRuntime {
         try {
             await context.requestStartRecordPromise;
 
+            // The panel needs usage while streaming, and pricing is static, so
+            // one lookup at the start of the turn is enough; persisting later
+            // uses the same data.
+            this.liveTracker = await this.createLiveUsageTracker(context);
+            // Heartbeat so the rate keeps being pushed during tool calls and
+            // first-token waits, when no chunk arrives.
+            this.liveTracker?.start();
+
             for (let retryAttempt = 0; retryAttempt <= MAX_REQUEST_RETRIES; retryAttempt += 1) {
                 const attemptResult = await this.executor.runAttempt({
                     startCheckpoint: resumeCheckpoint,
                     persister: context.persister,
                     taskId: this.options.taskId,
                     signal: this.options.signal,
-                    onChunk: this.options.onChunk,
+                    onChunk: (chunk) => {
+                        this.liveTracker?.consume(chunk);
+                        this.options.onChunk?.(chunk);
+                    },
                     onTurnEvent: this.options.onTurnEvent,
                     requestToolApproval: this.options.requestToolApproval,
                     requestUserQuestions: this.options.requestUserQuestions,
@@ -429,7 +493,15 @@ export class AiConversationRuntime {
 
                 if (attemptResult.error.is(AiErrorCode.REQUEST_CANCELLED)) {
                     try {
-                        await context.persister.markCancelled(attemptResult.partialOutputParts);
+                        await context.persister.markCancelled(attemptResult.partialOutputParts, {
+                            calls: attemptResult.calls,
+                            ttftMs: attemptResult.firstTtftMs,
+                            firstTextMs: attemptResult.firstTextMs,
+                            toolArgumentErrors: attemptResult.toolArgumentErrors,
+                            modelSwitchCount: attemptResult.modelSwitchCount,
+                            hitModelSwitchCeiling: attemptResult.hitModelSwitchCeiling,
+                            errorCode: attemptResult.error.code,
+                        });
                     } catch (persistError) {
                         console.error(
                             '[AiConversationRuntime] Failed to persist cancellation:',
@@ -441,6 +513,9 @@ export class AiConversationRuntime {
                             error: persistError,
                         });
                     }
+
+                    this.liveTracker?.stop();
+                    this.liveTracker = null;
                     this.requestFinalized = true;
                     if (this.options.taskId) {
                         this.options.onTurnEvent?.({
@@ -454,12 +529,20 @@ export class AiConversationRuntime {
 
                 if (this.shouldRetryAttempt(attemptResult, retryAttempt)) {
                     const nextAttempt = retryAttempt + 1;
-                    // 重试不是总从整轮开头开始，而是从最近一次安全 checkpoint 恢复。
+                    // A retry resumes from the last safe checkpoint rather than the start of the turn.
                     resumeCheckpoint = attemptResult.resumeCheckpoint;
                     try {
                         await context.persister.beginNextAttempt(
                             attemptResult.error.message,
-                            resumeCheckpoint
+                            resumeCheckpoint,
+                            {
+                                calls: attemptResult.calls,
+                                ttftMs: attemptResult.firstTtftMs,
+                                firstTextMs: attemptResult.firstTextMs,
+                                toolArgumentErrors: attemptResult.toolArgumentErrors,
+                                modelSwitchCount: attemptResult.modelSwitchCount,
+                                hitModelSwitchCeiling: attemptResult.hitModelSwitchCeiling,
+                            }
                         );
                     } catch (persistError) {
                         console.error(
@@ -495,7 +578,17 @@ export class AiConversationRuntime {
                 try {
                     await context.persister.markFailed(
                         attemptResult.error.message,
-                        attemptResult.partialOutputParts
+                        attemptResult.partialOutputParts,
+                        {
+                            calls: attemptResult.calls,
+                            ttftMs: attemptResult.firstTtftMs,
+                            firstTextMs: attemptResult.firstTextMs,
+                            toolArgumentErrors: attemptResult.toolArgumentErrors,
+                            modelSwitchCount: attemptResult.modelSwitchCount,
+                            hitModelSwitchCeiling: attemptResult.hitModelSwitchCeiling,
+                            errorCode: attemptResult.error.code,
+                            retryScope: resumeCheckpoint.iteration > 0 ? 'checkpoint' : 'restart',
+                        }
                     );
                 } catch (persistError) {
                     console.error(
@@ -508,6 +601,9 @@ export class AiConversationRuntime {
                         error: persistError,
                     });
                 }
+
+                this.liveTracker?.stop();
+                this.liveTracker = null;
                 this.requestFinalized = true;
                 if (this.options.taskId) {
                     this.options.onTurnEvent?.({
