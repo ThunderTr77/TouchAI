@@ -33,6 +33,21 @@ export default defineConfig({
         'src/components/appIconMap.ts',
       ],
       thresholds: {
+        // Global floor. It stops a change from quietly trading covered behavior for
+        // uncovered code; it is a regression guard, not a target to game.
+        // These keys must stay at the top level: vitest reads the global floor from
+        // thresholds.<metric> and treats a nested "global" object as a glob pattern
+        // that matches no file, which would leave the gate silently inert.
+        //
+        // The floor only moves up. Run `pnpm test:coverage:raise` after a change that
+        // genuinely raises coverage; it uses vitest's own thresholds.autoUpdate, which
+        // rewrites a number only when the measured value exceeds it, so a metric can never
+        // be lowered this way and a drop below the committed value fails CI.
+        // See docs/testing/testing.md.
+        statements: 75,
+        branches: 65,
+        functions: 74,
+        lines: 75,
         'src/services/EventService/**/*.ts': {
           statements: 90,
           branches: 100,

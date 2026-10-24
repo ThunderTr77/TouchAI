@@ -127,15 +127,21 @@ When a new primitive is needed:
 
 Styles that are genuinely one-off (a single complex animation, a bespoke layout) should stay inline. The goal is to remove duplicated primitives, not to route every element through a shared component.
 
-## Testing and TDD
+## Testing, BDD, and TDD
 
-For detailed testing guidelines, principles, and coverage requirements, see [docs/testing/testing.md](docs/testing/testing.md).
+Feature and fix work uses **BDD on top of TDD**: the acceptance scenario first, then the failing test, then the code. Test behavior, not implementation — if a rewrite behind the same public contract keeps the test green, it was testing behavior.
 
-We strongly recommend **Test-Driven Development (TDD)** for all `feat` and `fix` work:
+Every test name starts with `user` and reads as Given / When / Then, so a user or PM can read it:
 
-1. **Red** -- Write a failing test that describes the desired behavior.
-2. **Green** -- Write the minimum code to make the test pass.
-3. **Refactor** -- Clean up the code while keeping tests green.
+```ts
+describe('user submits a prompt', () => {
+    it('user sees the prompt sent when pressing Enter', async () => {
+        // ...
+    });
+});
+```
+
+Full guide, mocking rules, and coverage floors: [docs/testing/testing.md](docs/testing/testing.md).
 
 Before opening a PR, run the single validation command:
 
@@ -158,6 +164,7 @@ A good pull request should:
 - link the related issue or RFC
 - explain the user-facing impact
 - stay focused on one problem
+- include the acceptance scenario (Given / When / Then) for feature and fix work
 - include screenshots when UI changes are involved
 - include tests or explain why tests are not appropriate
 - explain database schema impact, baseline resets, or migration rewrites when relevant

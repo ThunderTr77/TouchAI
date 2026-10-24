@@ -4,28 +4,45 @@ Guidelines for writing and maintaining tests in the TouchAI codebase.
 
 ## Principles
 
-1. **Test behavior, not implementation.** Assert observable outcomes (return values, state changes, emitted events), not internal method calls or private variable values.
-2. **One behavior per test.** Each test should have exactly one reason to fail.
-3. **Prefer state and output assertions** over interaction (call-count) assertions.
-4. **Use real code paths where possible.** Only mock at system boundaries (Tauri IPC, network, OS). Never mock your own pure functions or local strategy objects.
-5. **Control all nondeterminism.** Time, timers, randomness, temp dirs, and network responses must be test-controlled.
+1. **One behavior per test.** Each test has exactly one reason to fail.
+2. **Control all nondeterminism.** Time, timers, randomness, temp dirs, and network responses must be test-controlled.
 
-## Test-Driven Development (TDD)
+The rest of this page expands on two rules: assert behavior, not implementation; and mock only at system boundaries.
 
-We strongly recommend TDD for all `feat` and `fix` work. The cycle:
+## Behavior, not implementation
 
-1. **Red** -- Write a failing test that describes the desired behavior.
-2. **Green** -- Write the minimum code to make the test pass.
-3. **Refactor** -- Clean up the code while keeping tests green.
+A test asserts what a user or caller can observe: a return value, a state change, an emitted event, a visible DOM node, a persisted row. It never asserts how the code gets there.
 
-Workflow:
+**Decision rule: if you rewrite the implementation behind the same public contract and the test still passes, it was testing behavior. If it breaks, it was testing implementation.**
 
-- Start by writing a test for the expected behavior (happy path, edge case, error path).
-- Run `pnpm test` (watch mode) and confirm the test fails.
-- Implement the code until the test passes.
-- Refactor, then run `pnpm test:pr` to verify full quality gate including coverage.
+```ts
+// Right: survives any rewrite of the billing path, and fails on a real double charge
+it('user is not charged twice when the same order is submitted twice', async () => {
+    await submitOrder(order);
+    await submitOrder(order);
 
-Exceptions: exploratory spikes, pure UI layout tweaks, or configuration changes where the behavior is better verified manually. In these cases, explain why TDD was not followed in the PR.
+    expect(await chargesFor(order)).toHaveLength(1);
+    expect(await balanceOf(customer)).toBe(initialBalance - orderTotal);
+});
+
+// Wrong: encodes one call sequence, passes while the user is double-charged elsewhere
+it('calls processPayment once', async () => {
+    await submitOrder(order);
+
+    expect(processPayment).toHaveBeenCalledTimes(1);
+});
+```
+
+## BDD and TDD
+
+Write the acceptance scenario before the test, the test before the code.
+
+1. **Scenario.** In the issue or PR, state the Given context, the When action, the Then outcome. A user or PM must be able to read it. If you cannot write it, the requirement is not understood.
+2. **Red.** Write a failing test for that scenario.
+3. **Green.** Write the minimum code to pass it.
+4. **Refactor.** Clean up with the tests green, then run `pnpm test:pr`.
+
+Exceptions: exploratory spikes, pure layout tweaks, config changes. Say why in the PR.
 
 ## Running Tests
 
@@ -42,13 +59,45 @@ pnpm check             # Quality checks only (type, lint, format, Rust)
 For Rust:
 
 ```bash
-cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets
-cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 pnpm test:rust                          # Run Rust tests
-pnpm test:coverage:rust                 # Run Rust tests with coverage (requires cargo-tarpaulin)
+pnpm test:coverage:rust                 # Run Rust tests with coverage (requires cargo-llvm-cov)
 ```
 
-CI runs both frontend and Rust coverage. Coverage reports are uploaded as artifacts and summarized in the GitHub step summary.
+CI runs both coverage gates on every desktop change: frontend in `frontend-tests`, Rust in `rust-coverage`. Each publishes a table to the step summary, and each failure blocks the required `CI Required` check.
+
+## Coverage
+
+A floor that stops regressions, not a target to game. A test added only to raise a number is noise: it still has to encode an observable behavior. **The floor never goes down. The goal is 85% on every metric.** Get there by covering real behavior, never by asserting on mocks or restating the implementation.
+
+Frontend floor in `apps/desktop/vitest.config.ts`:
+
+| Metric | Floor | Now | Target |
+| --- | ---: | ---: | ---: |
+| Statements | 75% | 75.9% | 85% |
+| Branches | 65% | 65.6% | 85% |
+| Functions | 74% | 74.8% | 85% |
+| Lines | 75% | 76.4% | 85% |
+
+The keys must stay at the top level of `thresholds`. A nested `global` object is read as a glob pattern matching no file, which leaves the gate silently inert.
+
+**Raising is one-way.** Run `pnpm test:coverage:raise` after a change that earns it; it is vitest's `thresholds.autoUpdate`, which rewrites a metric only when the measured value exceeds it. Run it on the full suite, not a filtered subset, or it ratchets to the subset.
+
+Rust floor in `apps/desktop/src-tauri/coverage-floors.json`, from **cargo-llvm-cov** (rustc's own `-C instrument-coverage`, not a ptrace debugger). It reports line and region coverage; region is the finer signal because it flags an expression that was only partly evaluated.
+
+| Metric | Floor | Now | Target |
+| --- | ---: | ---: | ---: |
+| Lines | 44% | 45.5% | 85% |
+| Regions | 43% | 44.2% | 85% |
+
+The `rust-coverage` job fails with the exact metric that regressed. Raise with `pnpm test:coverage:rust:raise`. Same one-way rule.
+
+**Why Rust starts lower.** Of its 11043 measured lines, covering every testable pure-logic line tops out near 50% total. The rest sits in browser/CDP, window-shell, clipboard, bootstrap and MCP client code, whose only realistic unit test asserts against mocks. So Rust rises with integration and E2E coverage, not with mock-heavy unit tests. Do not close the gap by testing stubs.
+
+Rust branch coverage is **not** collected: `--branch` needs nightly, and this job runs stable. The summarizer renders a Branches row when a branch-enabled run feeds it one, so enabling it later is a toolchain change in that job, not a script change. cargo-tarpaulin was replaced by llvm-cov in #598; its branch support was never implemented, so the dimension had never been measurable.
+
+- Per-file thresholds in `vitest.config.ts` are the enforced contract; do not lower one to land a change.
+- New modules start at the minimum in [Test Layers](#test-layers) and keep it.
+- A line covered only by an interaction assertion does not count as covered behavior.
 
 ## File Placement
 
@@ -66,106 +115,81 @@ apps/desktop/e2e-tests/     # Desktop E2E (WebDriverIO)
 apps/desktop/src-tauri/tests/ # Rust integration / command tests
 ```
 
-- Frontend tests: `apps/desktop/tests/**/*.test.ts`
+- Frontend tests: `apps/desktop/tests/**/*.test.ts`, mirroring the `src/` structure (`src/services/PopupService/manager.ts` → `tests/services/PopupService/manager.test.ts`)
 - Desktop E2E: `apps/desktop/e2e-tests/**/*.e2e.js`
 - Rust unit tests: `#[cfg(test)]` within the module
 - Rust integration tests: `apps/desktop/src-tauri/tests/**/*.rs`
 
-Mirror the `apps/desktop/src/` directory structure inside `apps/desktop/tests/`. For example, `apps/desktop/src/services/PopupService/manager.ts` is tested in `apps/desktop/tests/services/PopupService/manager.test.ts`.
-
 ## Test Layers
 
-### Frontend Logic (composables, services, pure functions)
+**Frontend logic.** Test via inputs, outputs, and state transitions; mock only Tauri IPC and external APIs. Minimum for a new module: one happy path, one edge case, one error path.
 
-- Test via inputs, outputs, and state transitions.
-- Mock only Tauri IPC and external APIs.
-- Minimum coverage for a new module:
-  - 1 happy path
-  - 1 edge case
-  - 1 error/rejection path
+**Vue components.** Test through the public interface: props, emits, visible DOM, user interactions. Never assert internal reactive variables or watcher counts. Minimum: one render, one core interaction, one error or disabled state.
 
-### Vue Components
+**Rust logic.** Assert state transitions, not log output. Drive state machines with real inputs; do not mock helpers in the same module. Minimum: one happy path, one boundary value, one error branch.
 
-- Test through the public interface: props, emits, visible DOM, user interactions.
-- Do not assert internal reactive variables or watcher call counts.
-- Minimum: 1 render test, 1 core interaction, 1 error/disabled state.
+**Tauri commands.** Use `tauri::test` for parameter parsing, state wiring, and return shapes. One clear contract per test; do not re-cover lower-level logic.
 
-### Rust Logic
-
-- Assert state transitions, not log output or internal intermediaries.
-- Drive state machines with real inputs; do not mock helpers in the same module.
-- Minimum: 1 happy path, 1 boundary value, 1 error branch.
-
-### Tauri Commands
-
-- Use `tauri::test` for parameter parsing, state wiring, and return shapes.
-- Each command test verifies one clear contract.
-- Do not re-cover lower-level logic already tested elsewhere.
-
-### Desktop E2E
-
-- Verify critical cross-layer user flows only (app launch, search, settings).
-- Do not use E2E to cover logic that unit tests already express reliably.
+**Desktop E2E.** Critical cross-layer flows only (launch, search, settings). Do not use E2E for logic unit tests already cover reliably.
 
 ## Naming Tests
 
-Describe the behavior and condition. A reader should understand the failure from the name alone.
+Every test is a user story in Given / When / Then form, readable by a user or PM without opening the source.
 
-```
-// Good
-"returns manual override when user drags height outside programmatic resize path"
-"replays pending popup payload after popup ready event"
-"clears input on Escape when input has text"
+- The `describe` block names the **Given** context.
+- The `it(...)` description begins with the lowercase word `user`, then names the **When** action and the **Then** outcome.
+- No test name contains an internal symbol name, a function name, or a file name.
 
-// Bad
-"test popup"
-"works correctly"
-"handles case 1"
+```ts
+describe('user submits a prompt', () => {
+    // Given the editor holds text and no request is running
+    it('user sees the prompt sent when pressing Enter', async () => {
+        // ...
+    });
+
+    it('user sees an inline error when the request fails', async () => {
+        // ...
+    });
+});
 ```
+
+Nested `describe` blocks carry the narrower Given context; the `it(...)` still starts with `user`.
+
+```ts
+describe('user edits a saved model', () => {
+    describe('given the API key field is empty', () => {
+        it('user sees the save action disabled', () => {
+            // ...
+        });
+    });
+});
+```
+
+Renaming an existing test: keep the behavior, drop the internals. `it('calls onSubmit with the payload')` becomes `it('user sees the prompt sent when pressing Enter')` under `describe('user submits a prompt')`.
+
+Rust follows the same rule in snake_case: `#[test] fn user_sees_prompt_sent_when_pressing_enter()`.
 
 ## Mocking
 
-**Mock at system boundaries only:**
-
-- `@tauri-apps/api/mocks` for Tauri IPC
-- `tauri::test` for Rust commands
-- Vitest fake timers for `setTimeout`/`setInterval`
-
-**Do not mock:**
-
-- Your own pure functions or strategy objects
-- Internal helpers just to assert they were called
-
-If a module requires heavy mocking to test, it likely needs refactoring first.
+Mock at system boundaries only: `@tauri-apps/api/mocks` for Tauri IPC, `tauri::test` for Rust commands, Vitest fake timers for timers. Do not mock your own pure functions or strategy objects, and never mock an internal helper just to assert it was called. If a module needs heavy mocking to test, it needs refactoring first.
 
 ## Assertion Priority
 
-In descending order of preference:
-
-1. Return values
-2. Observable state changes
-3. Emitted public events
-4. Visible DOM / user-facing output
-5. Boundary contract (IPC args/shape)
+Prefer, in descending order: return values, observable state changes, emitted public events, visible DOM, boundary contract (IPC args/shape).
 
 Interaction assertions (call counts, call order) are allowed only when the call itself is a public contract and omitting it would make the behavior unverifiable.
 
 ## Error Testing
 
-Do not just assert that an error is thrown. Also verify:
-
-- The error type or message is stable.
-- State is correctly rolled back.
-- Subsequent inputs still work after the error.
+Do not just assert that an error is thrown. Also verify the error type or message is stable, state is rolled back, and subsequent inputs still work.
 
 ## PR Checklist
 
-Before submitting a test PR, verify:
-
-- [ ] Tests cover behavior, not implementation details.
-- [ ] Without these tests, would a real regression go undetected?
-- [ ] Could this be tested at a lower (cheaper, more stable) layer?
+- [ ] The acceptance scenario is in the issue or PR, and the tests implement it.
+- [ ] A rewrite behind the same public contract would keep these tests green.
+- [ ] Names start with `user`, give the Given context, the When, and the Then, with no internal symbol, function, or file name.
+- [ ] Without these tests, a real regression would go undetected.
+- [ ] This could not be tested at a cheaper, more stable layer.
 - [ ] Mocks are limited to system boundaries.
-- [ ] Test names explain the failure reason.
-- [ ] Happy path, edge case, and error path are all covered.
-- [ ] Tests pass via `pnpm test:pr` (includes type check, lint, format, unit tests, and coverage).
+- [ ] Happy path, edge case, and error path are covered.
+- [ ] `pnpm test:pr` passes.
