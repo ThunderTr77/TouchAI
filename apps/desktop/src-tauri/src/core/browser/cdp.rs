@@ -1348,6 +1348,612 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::core::browser::actions::BrowserResolvedFormField;
+
+    // The console and network panels are the only way the user sees what the page did, and
+    // they are also what the model reasons over. These tests pin the lines it will read.
+
+    #[test]
+    fn user_sees_a_console_line_with_the_level_and_joined_arguments() {
+        let line = format_runtime_console_event(&json!({
+            "type": "warning",
+            "args": [{ "value": "first" }, { "description": "second" }]
+        }));
+
+        assert_eq!(line, "console.warning: first second");
+    }
+
+    #[test]
+    fn user_sees_a_placeholder_when_a_console_event_carries_no_text() {
+        let line = format_runtime_console_event(&json!({ "type": "log", "args": [] }));
+
+        assert_eq!(line, "console.log: console event");
+    }
+
+    #[test]
+    fn user_sees_a_console_event_without_a_type_still_labelled() {
+        let line = format_runtime_console_event(&json!({ "args": [{ "value": "hi" }] }));
+
+        assert_eq!(line, "console.console: hi");
+    }
+
+    #[test]
+    fn user_gets_only_the_first_arguments_when_a_console_event_is_flooded() {
+        let args: Vec<serde_json::Value> = (0..MAX_DIAGNOSTIC_ARGS + 4)
+            .map(|index| json!({ "value": format!("arg{index}") }))
+            .collect();
+
+        let line = format_runtime_console_event(&json!({ "type": "log", "args": args }));
+
+        // A page that logs a thousand arguments must not push everything else out of the panel.
+        assert!(line.contains("arg0"));
+        assert!(!line.contains(&format!("arg{}", MAX_DIAGNOSTIC_ARGS)));
+    }
+
+    #[test]
+    fn user_sees_a_log_entry_line_with_its_level() {
+        let line = format_log_entry_event(&json!({
+            "entry": { "level": "error", "text": "something broke" }
+        }));
+
+        assert_eq!(line, "log.error: something broke");
+    }
+
+    #[test]
+    fn user_sees_a_log_entry_placeholder_when_the_text_is_missing() {
+        let line = format_log_entry_event(&json!({ "entry": { "level": "verbose" } }));
+
+        assert_eq!(line, "log.verbose: log entry");
+    }
+
+    #[test]
+    fn user_sees_a_log_entry_read_from_the_params_when_it_is_not_wrapped() {
+        let line = format_log_entry_event(&json!({ "level": "info", "text": "bare" }));
+
+        assert_eq!(line, "log.info: bare");
+    }
+
+    #[test]
+    fn user_sees_a_failed_response_with_its_status_and_url() {
+        let line = format_network_response_event(&json!({
+            "response": {
+                "status": 404,
+                "statusText": "Not Found",
+                "url": "https://example.com/missing"
+            }
+        }));
+
+        assert_eq!(
+            line.as_deref(),
+            Some("response 404 Not Found: https://example.com/missing")
+        );
+    }
+
+    #[test]
+    fn user_does_not_get_a_network_line_for_a_successful_response() {
+        // Only failures are worth the panel space; a 200 for every asset would bury them.
+        let line = format_network_response_event(&json!({
+            "response": { "status": 200, "url": "https://example.com" }
+        }));
+
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn user_gets_a_network_line_when_the_response_has_no_status() {
+        let line = format_network_response_event(&json!({ "response": { "url": "x" } }));
+
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn user_sees_unknown_url_when_a_failed_response_omits_it() {
+        let line = format_network_response_event(&json!({ "response": { "status": 500 } }));
+
+        assert_eq!(line.as_deref(), Some("response 500 : unknown URL"));
+    }
+
+    #[test]
+    fn user_sees_the_url_of_a_failed_request_resolved_from_its_id() {
+        let mut urls = BTreeMap::new();
+        urls.insert("req-1".to_string(), "https://example.com/api".to_string());
+
+        let line = format_network_failed_event(
+            &json!({ "requestId": "req-1", "errorText": "net::ERR_TIMED_OUT" }),
+            &urls,
+        );
+
+        assert_eq!(line, "failed net::ERR_TIMED_OUT: https://example.com/api");
+    }
+
+    #[test]
+    fn user_sees_unknown_url_when_a_failed_request_was_never_seen() {
+        let line = format_network_failed_event(&json!({ "requestId": "gone" }), &BTreeMap::new());
+
+        assert_eq!(line, "failed network request failed: unknown URL");
+    }
+
+    #[test]
+    fn user_gets_a_truncation_marker_on_a_line_that_is_too_long() {
+        let line = truncate_text(
+            &"a".repeat(MAX_DIAGNOSTIC_ENTRY_BYTES + 10),
+            MAX_DIAGNOSTIC_ENTRY_BYTES,
+        );
+
+        assert!(line.ends_with(TRUNCATED_SUFFIX));
+        assert!(line.len() <= MAX_DIAGNOSTIC_ENTRY_BYTES);
+    }
+
+    #[test]
+    fn user_gets_short_text_left_exactly_as_it_was() {
+        assert_eq!(truncate_text("short", 100), "short");
+    }
+
+    #[test]
+    fn user_does_not_get_a_split_character_when_text_is_cut() {
+        // A multi-byte character straddling the boundary must be dropped whole, not halved.
+        // With a budget that fits the marker, the marker survives and the text is cut before it.
+        // 3 bytes per character, so this is well past the byte budget.
+        let line = truncate_text(
+            &"\u{4e2d}".repeat(MAX_DIAGNOSTIC_ENTRY_BYTES),
+            MAX_DIAGNOSTIC_ENTRY_BYTES,
+        );
+
+        assert!(line.len() <= MAX_DIAGNOSTIC_ENTRY_BYTES);
+        assert!(line.ends_with(TRUNCATED_SUFFIX));
+        // The kept prefix is whole characters, so the byte length is a multiple of three.
+        let kept = line.trim_end_matches(TRUNCATED_SUFFIX);
+        assert_eq!(kept.len() % 3, 0, "a character was split: {kept:?}");
+    }
+
+    #[test]
+    fn user_gets_a_cut_without_a_marker_when_the_budget_is_tiny() {
+        // Below the marker length there is no room for it, so only the text is cut.
+        let line = truncate_text(&"\u{4e2d}".repeat(100), 9);
+
+        assert!(line.len() <= 9);
+        assert!(!line.contains(TRUNCATED_SUFFIX));
+        assert_eq!(line.len() % 3, 0, "a character was split: {line:?}");
+    }
+
+    #[test]
+    fn user_gets_no_marker_when_the_budget_is_smaller_than_the_marker() {
+        let line = truncate_text(&"a".repeat(50), 4);
+
+        assert!(line.len() <= 4);
+        assert!(!line.contains(TRUNCATED_SUFFIX));
+    }
+
+    // The DOM snapshot is what the model acts on. A ref it never saw, or a selector built from
+    // an unescaped string, means acting on the wrong element.
+
+    fn target(id: &str, url: &str, title: &str) -> CdpTarget {
+        serde_json::from_value(json!({
+            "id": id,
+            "url": url,
+            "title": title,
+            "type": "page",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/x"
+        }))
+        .expect("a target deserialises")
+    }
+
+    #[test]
+    fn user_gets_a_stable_navigation_token_for_an_unchanged_page() {
+        let page = target("t1", "https://example.com", "Example");
+
+        assert_eq!(navigation_token(&page), navigation_token(&page));
+    }
+
+    #[test]
+    fn user_gets_a_new_navigation_token_when_the_page_moves() {
+        let before = target("t1", "https://example.com/a", "A");
+        let after = target("t1", "https://example.com/b", "B");
+
+        assert_ne!(navigation_token(&before), navigation_token(&after));
+    }
+
+    #[test]
+    fn user_gets_a_new_navigation_token_when_the_tab_changes() {
+        let first = target("t1", "https://example.com", "Example");
+        let second = target("t2", "https://example.com", "Example");
+
+        assert_ne!(navigation_token(&first), navigation_token(&second));
+    }
+
+    #[test]
+    fn user_gets_the_token_shape_the_frontend_compares() {
+        let token = navigation_token(&target("t1", "u", "t"));
+
+        assert!(token.starts_with("nav-"), "unexpected token: {token}");
+    }
+
+    #[test]
+    fn user_gets_a_tab_that_carries_the_page_details() {
+        let page = target("t1", "https://example.com", "Example");
+
+        let tab = page.to_tab(true);
+
+        assert_eq!(tab.id, "t1");
+        assert_eq!(tab.url, "https://example.com");
+        assert_eq!(tab.title, "Example");
+        assert!(tab.active);
+        assert_eq!(tab.navigation_token, navigation_token(&page));
+    }
+
+    #[test]
+    fn user_gets_an_inactive_tab_flagged_as_inactive() {
+        let tab = target("t1", "u", "t").to_tab(false);
+
+        assert!(!tab.active);
+    }
+
+    #[test]
+    fn user_gets_dom_refs_built_from_the_snapshot_with_their_own_ids() {
+        let value = json!({
+            "result": {
+                "value": [
+                    { "selector": "#a", "description": "button", "editable": false, "x": 1.5, "y": 2.5 },
+                    { "selector": "#b", "editable": true }
+                ]
+            }
+        });
+
+        let refs = parse_dom_refs(value, "nav-1").expect("a valid snapshot parses");
+
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].ref_id, "ref-0");
+        assert_eq!(refs[0].selector, "#a");
+        assert_eq!(refs[0].description, "button");
+        assert!(!refs[0].editable);
+        assert_eq!(refs[0].x, 1.5);
+        assert_eq!(refs[1].ref_id, "ref-1");
+        assert!(refs[1].editable);
+        // Missing description and coordinates fall back rather than dropping the ref.
+        assert_eq!(refs[1].description, "element");
+        assert_eq!(refs[1].x, 0.0);
+        assert_eq!(refs[0].navigation_token, "nav-1");
+    }
+
+    #[test]
+    fn user_does_not_get_a_dom_ref_without_a_selector() {
+        let value = json!({
+            "result": { "value": [{ "description": "no selector" }, { "selector": "#kept" }] }
+        });
+
+        let refs = parse_dom_refs(value, "nav-1").expect("the snapshot still parses");
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].selector, "#kept");
+    }
+
+    #[test]
+    fn user_gets_a_clear_error_when_the_snapshot_is_not_an_array() {
+        let error = parse_dom_refs(json!({ "result": { "value": 5 } }), "nav-1")
+            .expect_err("a non-array snapshot must be refused");
+
+        assert_eq!(error, "Browser DOM snapshot did not return an array");
+    }
+
+    #[test]
+    fn user_gets_a_selector_escaped_so_it_survives_a_script_string() {
+        // The selector is interpolated into a script, so quotes must be escaped.
+        assert_eq!(css_string("a\"b"), "\"a\\\"b\"");
+    }
+
+    #[test]
+    fn user_gets_an_ordinary_selector_wrapped_in_quotes() {
+        assert_eq!(css_string("#a"), "\"#a\"");
+    }
+
+    #[test]
+    fn user_gets_a_text_entry_control_recognised_by_its_tag() {
+        assert!(is_text_entry_control(&FocusedEditableElement {
+            tag: "TEXTAREA".to_string(),
+            input_type: String::new(),
+            content_editable: false,
+        }));
+    }
+
+    #[test]
+    fn user_gets_a_content_editable_region_treated_as_text_entry() {
+        assert!(is_text_entry_control(&FocusedEditableElement {
+            tag: "DIV".to_string(),
+            input_type: String::new(),
+            content_editable: true,
+        }));
+    }
+
+    #[test]
+    fn user_gets_every_text_input_type_accepted() {
+        for input_type in [
+            "", "text", "search", "tel", "url", "email", "password", "number",
+        ] {
+            assert!(
+                is_text_entry_control(&FocusedEditableElement {
+                    tag: "INPUT".to_string(),
+                    input_type: input_type.to_string(),
+                    content_editable: false,
+                }),
+                "input type '{input_type}' should accept typing"
+            );
+        }
+    }
+
+    #[test]
+    fn user_does_not_get_a_non_text_input_accepted() {
+        for input_type in ["checkbox", "radio", "file", "submit", "range"] {
+            assert!(
+                !is_text_entry_control(&FocusedEditableElement {
+                    tag: "INPUT".to_string(),
+                    input_type: input_type.to_string(),
+                    content_editable: false,
+                }),
+                "input type '{input_type}' should not accept typing"
+            );
+        }
+    }
+
+    #[test]
+    fn user_does_not_get_a_non_input_element_accepted() {
+        assert!(!is_text_entry_control(&FocusedEditableElement {
+            tag: "BUTTON".to_string(),
+            input_type: String::new(),
+            content_editable: false,
+        }));
+    }
+
+    #[test]
+    fn user_gets_a_plain_override_value_kept() {
+        assert_eq!(normalized_override_value("  en-US  "), Some("en-US"));
+    }
+
+    #[test]
+    fn user_gets_an_unsafe_override_value_dropped() {
+        assert_eq!(normalized_override_value(""), None);
+        assert_eq!(normalized_override_value("   "), None);
+        assert_eq!(normalized_override_value("--x"), None);
+        assert_eq!(normalized_override_value("a\u{0000}b"), None);
+    }
+
+    #[test]
+    fn user_gets_the_fingerprint_script_defaulting_to_the_app_locale() {
+        let script = browser_fingerprint_compat_script(None);
+
+        assert!(script.contains("zh-CN"));
+    }
+
+    #[test]
+    fn user_gets_the_chosen_locale_in_the_fingerprint_script() {
+        let script = browser_fingerprint_compat_script(Some("en-US"));
+
+        assert!(script.contains("en-US"));
+        assert!(!script.contains("zh-CN"));
+    }
+
+    #[test]
+    fn user_gets_the_default_locale_when_the_override_is_unsafe() {
+        let script = browser_fingerprint_compat_script(Some("--evil"));
+
+        assert!(script.contains("zh-CN"));
+    }
+
+    // A websocket frame from a page can be arbitrarily large. Every read is bounded before it
+    // is parsed, so one runaway page cannot exhaust memory.
+
+    #[test]
+    fn user_gets_a_text_message_kept_when_it_fits() {
+        let text = cdp_message_text(Message::Text("{\"a\":1}".into()), 1024)
+            .expect("a small message passes");
+
+        assert_eq!(text.as_deref(), Some("{\"a\":1}"));
+    }
+
+    #[test]
+    fn user_gets_an_oversized_text_message_dropped() {
+        let error = cdp_message_text(Message::Text("a".repeat(2048).into()), 1024)
+            .expect_err("an oversized message must be refused");
+
+        assert_eq!(error, "CDP message exceeded the size limit");
+    }
+
+    #[test]
+    fn user_gets_a_binary_message_read_as_text() {
+        let text = cdp_message_text(Message::Binary(Vec::from("{\"b\":2}").into()), 1024)
+            .expect("a small binary message passes");
+
+        assert_eq!(text.as_deref(), Some("{\"b\":2}"));
+    }
+
+    #[test]
+    fn user_gets_an_oversized_binary_message_dropped() {
+        let error = cdp_message_text(Message::Binary(vec![b'a'; 2048].into()), 1024)
+            .expect_err("an oversized binary message must be refused");
+
+        assert_eq!(error, "CDP message exceeded the size limit");
+    }
+
+    #[test]
+    fn user_gets_a_closed_socket_reported_rather_than_silently_ignored() {
+        let error =
+            cdp_message_text(Message::Close(None), 1024).expect_err("a close frame must surface");
+
+        assert_eq!(error, "Browser websocket closed");
+    }
+
+    #[test]
+    fn user_gets_a_control_frame_skipped() {
+        let text = cdp_message_text(Message::Ping(Vec::new().into()), 1024)
+            .expect("a control frame is not an error");
+
+        assert_eq!(text, None);
+    }
+
+    #[test]
+    fn user_gets_a_json_body_parsed_when_it_fits() {
+        #[derive(serde::Deserialize)]
+        struct Payload {
+            a: i32,
+        }
+
+        let parsed: Payload =
+            parse_bounded_json_bytes(br#"{"a":1}"#, 1024, "Body").expect("a small body parses");
+
+        assert_eq!(parsed.a, 1);
+    }
+
+    #[test]
+    fn user_gets_an_oversized_body_refused_before_parsing() {
+        let error = parse_bounded_json_bytes::<serde_json::Value>(&[b' '; 2048], 1024, "Body")
+            .expect_err("an oversized body must be refused");
+
+        assert_eq!(error, "Body exceeded the size limit");
+    }
+
+    #[test]
+    fn user_gets_malformed_json_reported() {
+        let error = parse_bounded_json_bytes::<serde_json::Value>(b"not json", 1024, "Body")
+            .expect_err("malformed json must be refused");
+
+        assert!(!error.is_empty());
+    }
+
+    #[test]
+    fn user_gets_the_websocket_message_size_bounded() {
+        let config = websocket_config(4096);
+
+        assert_eq!(config.max_message_size, Some(4096));
+        assert_eq!(config.max_frame_size, Some(4096));
+    }
+
+    #[test]
+    fn user_gets_an_action_revalidated_when_the_page_has_not_moved() {
+        let reference = BrowserDomRef {
+            ref_id: "ref-0".to_string(),
+            navigation_token: "nav-1".to_string(),
+            description: "button".to_string(),
+            editable: false,
+            selector: "#a".to_string(),
+            x: 0.0,
+            y: 0.0,
+        };
+        let resolved = BrowserResolvedAction {
+            reference: Some(&reference),
+            form_fields: Vec::new(),
+            page_navigation_token: None,
+            requires_current_observation: false,
+        };
+
+        assert!(revalidate_resolved_action(&resolved, "nav-1").is_ok());
+    }
+
+    #[test]
+    fn user_is_stopped_when_the_page_moved_before_the_action_ran() {
+        let reference = BrowserDomRef {
+            ref_id: "ref-0".to_string(),
+            navigation_token: "nav-1".to_string(),
+            description: "button".to_string(),
+            editable: false,
+            selector: "#a".to_string(),
+            x: 0.0,
+            y: 0.0,
+        };
+        let resolved = BrowserResolvedAction {
+            reference: Some(&reference),
+            form_fields: Vec::new(),
+            page_navigation_token: None,
+            requires_current_observation: false,
+        };
+
+        let error = revalidate_resolved_action(&resolved, "nav-2")
+            .expect_err("a moved page must stop the action");
+
+        assert_eq!(error, "Browser ref is stale; observe again before acting");
+    }
+
+    #[test]
+    fn user_is_stopped_when_a_form_field_moved_before_the_fill_ran() {
+        let resolved = BrowserResolvedAction {
+            reference: None,
+            form_fields: vec![BrowserResolvedFormField {
+                navigation_token: "nav-1".to_string(),
+                selector: "#a".to_string(),
+                value: "v".to_string(),
+            }],
+            page_navigation_token: None,
+            requires_current_observation: false,
+        };
+
+        let error = revalidate_resolved_action(&resolved, "nav-2")
+            .expect_err("a moved field must stop the fill");
+
+        assert_eq!(error, "Browser ref is stale; observe again before acting");
+    }
+
+    #[test]
+    fn user_is_stopped_when_the_page_token_is_stale_for_a_ref_less_action() {
+        let resolved = BrowserResolvedAction {
+            reference: None,
+            form_fields: Vec::new(),
+            page_navigation_token: Some("nav-1".to_string()),
+            requires_current_observation: true,
+        };
+
+        let error = revalidate_resolved_action(&resolved, "nav-2")
+            .expect_err("a stale page token must stop the action");
+
+        assert_eq!(error, "Browser ref is stale; observe again before acting");
+    }
+
+    #[test]
+    fn user_gets_an_action_with_nothing_to_check_accepted() {
+        let resolved = BrowserResolvedAction {
+            reference: None,
+            form_fields: Vec::new(),
+            page_navigation_token: None,
+            requires_current_observation: false,
+        };
+
+        assert!(revalidate_resolved_action(&resolved, "anything").is_ok());
+    }
+
+    #[test]
+    fn user_gets_a_screenshot_artifact_restricted_after_writing() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("shot.png");
+        fs::write(&path, b"png").expect("write");
+
+        harden_artifact_file(&path).expect("hardening succeeds");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Start permissive is impossible to arrange for a file we just wrote (0644), so
+            // assert the mode was narrowed to owner-only either way.
+            let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "unexpected artifact mode: {mode:o}");
+        }
+    }
+
+    #[test]
+    fn user_gets_the_artifact_directory_restricted() {
+        let dir = TempDir::new().expect("temp dir");
+        let nested = dir.path().join("artifacts");
+        fs::create_dir(&nested).expect("create");
+
+        harden_artifact_directory(&nested).expect("hardening succeeds");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&nested)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "unexpected directory mode: {mode:o}");
+        }
+    }
 
     #[test]
     fn diagnostic_lines_are_byte_bounded() {

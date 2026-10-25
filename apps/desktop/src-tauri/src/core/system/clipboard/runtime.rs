@@ -432,20 +432,297 @@ fn append_payload_attachment_fragments(
 }
 
 fn build_snapshot_content_identity(text: Option<&str>, html: Option<&str>) -> Option<String> {
+    // Each part is length-prefixed so a text that contains the separator cannot be mistaken
+    // for a different text/html pair. Without this, text "x\nhtml:y" and the pair
+    // (text "x", html "y") would hash to the same snapshot id and the renderer would treat
+    // the second copy as unchanged.
     match (text, html) {
-        (Some(text), Some(html)) => Some(format!("text:{text}\nhtml:{html}")),
-        (Some(text), None) => Some(format!("text:{text}")),
-        (None, Some(html)) => Some(format!("html:{html}")),
+        (Some(text), Some(html)) => Some(format!(
+            "{}:{text}{}:{html}",
+            tag("text", text),
+            tag("html", html)
+        )),
+        (Some(text), None) => Some(format!("{}:{text}", tag("text", text))),
+        (None, Some(html)) => Some(format!("{}:{html}", tag("html", html))),
         (None, None) => None,
     }
+}
+
+/// Length prefix for one identity part, so the boundary is unambiguous.
+fn tag(label: &str, value: &str) -> String {
+    format!("{label}:{}", value.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         append_payload_attachment_fragments, build_snapshot_content_identity,
-        ClipboardPayloadFragment,
+        next_shortcut_auto_paste_seq, now_millis, ClipboardPayloadFragment, ClipboardRuntimeState,
+        ClipboardSnapshot, ClipboardSnapshotReadMode,
     };
+
+    // The runtime decides whether a shortcut press pastes the clipboard. Pasting twice from
+    // one press, or pasting something the user copied an hour ago, is worse than not pasting.
+
+    fn snapshot(id: &str, observed_at: u64) -> ClipboardSnapshot {
+        ClipboardSnapshot {
+            snapshot_id: id.to_string(),
+            observed_at,
+            text: Some(format!("text-{id}")),
+            html: None,
+            html_source_url: None,
+            html_images: Vec::new(),
+            image_paths: Vec::new(),
+            file_paths: Vec::new(),
+            fragments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn user_gets_the_first_observation_time_kept_when_the_same_content_is_seen_again() {
+        let mut state = ClipboardRuntimeState::default();
+        state.remember_snapshot(snapshot("clip-1", 1_000));
+
+        state.remember_snapshot(snapshot("clip-1", 9_000));
+
+        // Re-reading identical content must not extend the freshness window.
+        assert_eq!(
+            state.latest_snapshot.expect("a snapshot").observed_at,
+            1_000
+        );
+    }
+
+    #[test]
+    fn user_gets_a_new_observation_time_for_different_content() {
+        let mut state = ClipboardRuntimeState::default();
+        state.remember_snapshot(snapshot("clip-1", 1_000));
+
+        state.remember_snapshot(snapshot("clip-2", 9_000));
+
+        assert_eq!(
+            state.latest_snapshot.expect("a snapshot").observed_at,
+            9_000
+        );
+    }
+
+    #[test]
+    fn user_gets_no_snapshot_after_it_is_cleared() {
+        let mut state = ClipboardRuntimeState::default();
+        state.remember_snapshot(snapshot("clip-1", 1_000));
+
+        state.clear_snapshot();
+
+        assert!(state.latest_snapshot.is_none());
+    }
+
+    #[test]
+    fn user_gets_no_auto_paste_without_a_shortcut_press() {
+        let mut state = ClipboardRuntimeState::default();
+        state.remember_snapshot(snapshot("clip-1", 1_000));
+
+        // Nothing authorised the paste, so a plain read must not produce one.
+        assert!(state
+            .consume_shortcut_auto_paste_payload(60_000, 2_000)
+            .is_none());
+    }
+
+    #[test]
+    fn user_gets_the_clipboard_pasted_after_pressing_the_shortcut() {
+        let mut state = ClipboardRuntimeState::default();
+        state.remember_snapshot(snapshot("clip-1", 1_000));
+        state.authorize_shortcut_auto_paste();
+
+        let payload = state
+            .consume_shortcut_auto_paste_payload(60_000, 2_000)
+            .expect("a fresh snapshot pastes");
+
+        assert_eq!(payload.snapshot_id, "clip-1");
+    }
+
+    #[test]
+    fn user_does_not_get_the_same_clipboard_pasted_twice() {
+        let mut state = ClipboardRuntimeState::default();
+        state.remember_snapshot(snapshot("clip-1", 1_000));
+        state.authorize_shortcut_auto_paste();
+        let _ = state.consume_shortcut_auto_paste_payload(60_000, 2_000);
+
+        state.authorize_shortcut_auto_paste();
+
+        // A second press on unchanged content must not paste it again.
+        assert!(state
+            .consume_shortcut_auto_paste_payload(60_000, 3_000)
+            .is_none());
+    }
+
+    #[test]
+    fn user_gets_the_new_clipboard_pasted_after_copying_something_else() {
+        let mut state = ClipboardRuntimeState::default();
+        state.remember_snapshot(snapshot("clip-1", 1_000));
+        state.authorize_shortcut_auto_paste();
+        let _ = state.consume_shortcut_auto_paste_payload(60_000, 2_000);
+
+        state.remember_snapshot(snapshot("clip-2", 3_000));
+        state.authorize_shortcut_auto_paste();
+
+        let payload = state
+            .consume_shortcut_auto_paste_payload(60_000, 4_000)
+            .expect("new content pastes");
+
+        assert_eq!(payload.snapshot_id, "clip-2");
+    }
+
+    #[test]
+    fn user_does_not_get_stale_clipboard_pasted() {
+        let mut state = ClipboardRuntimeState::default();
+        state.remember_snapshot(snapshot("clip-1", 1_000));
+        state.authorize_shortcut_auto_paste();
+
+        // Older than the window the caller allows.
+        assert!(state
+            .consume_shortcut_auto_paste_payload(500, 5_000)
+            .is_none());
+    }
+
+    #[test]
+    fn user_gets_the_authorisation_spent_after_one_press() {
+        let mut state = ClipboardRuntimeState::default();
+        state.remember_snapshot(snapshot("clip-1", 1_000));
+        state.authorize_shortcut_auto_paste();
+        let _ = state.consume_shortcut_auto_paste_payload(60_000, 2_000);
+
+        // The authorisation is one-shot, so a stale read does not silently reuse it.
+        assert!(state
+            .consume_shortcut_auto_paste_payload(60_000, 2_000)
+            .is_none());
+    }
+
+    #[test]
+    fn user_gets_no_auto_paste_when_the_clipboard_is_empty() {
+        let mut state = ClipboardRuntimeState::default();
+        state.authorize_shortcut_auto_paste();
+
+        assert!(state
+            .consume_shortcut_auto_paste_payload(60_000, 2_000)
+            .is_none());
+    }
+
+    #[test]
+    fn user_gets_external_images_resolved_only_for_an_explicit_read() {
+        assert!(ClipboardSnapshotReadMode::ResolveExternalImages.should_resolve_external_images());
+        assert!(!ClipboardSnapshotReadMode::Observe.should_resolve_external_images());
+    }
+
+    // The snapshot identity decides whether the renderer treats two reads as the same content.
+    // HTML has to count, or copying formatted text over plain text of the same words looks
+    // unchanged and the new formatting never reaches the prompt.
+
+    #[test]
+    fn user_gets_a_distinct_identity_for_plain_text() {
+        let plain = build_snapshot_content_identity(Some("hello"), None);
+        let rich = build_snapshot_content_identity(None, Some("hello"));
+
+        assert!(plain.is_some());
+        assert_ne!(plain, rich, "text and html must not share an identity");
+    }
+
+    #[test]
+    fn user_gets_a_distinct_identity_for_html_only() {
+        let html = build_snapshot_content_identity(None, Some("<b>x</b>"));
+
+        assert!(html.is_some());
+        assert_ne!(html, build_snapshot_content_identity(None, None));
+    }
+
+    #[test]
+    fn user_does_not_get_a_collision_when_the_text_contains_the_separator() {
+        // A text that embeds "html:y" must not look like a real text/html pair.
+        let forged = build_snapshot_content_identity(Some("x\nhtml:y"), None);
+        let real = build_snapshot_content_identity(Some("x"), Some("y"));
+
+        assert_ne!(forged, real, "the identity is ambiguous: {forged:?}");
+    }
+
+    #[test]
+    fn user_does_not_get_a_collision_when_the_text_embeds_a_length_prefix() {
+        let forged = build_snapshot_content_identity(Some("1:a"), None);
+        let real = build_snapshot_content_identity(Some("a"), None);
+
+        assert_ne!(forged, real, "the identity is ambiguous: {forged:?}");
+    }
+
+    #[test]
+    fn user_gets_both_parts_recorded_when_text_and_html_are_present() {
+        let both = build_snapshot_content_identity(Some("x"), Some("<b>x</b>"))
+            .expect("a pair produces an identity");
+
+        // Both parts must be present and ordered, so a swap is not equal either.
+        assert!(both.contains("text"));
+        assert!(both.contains("html"));
+        assert_ne!(
+            both,
+            build_snapshot_content_identity(Some("<b>x</b>"), Some("x")).expect("swapped")
+        );
+    }
+
+    #[test]
+    fn user_gets_no_identity_for_an_empty_clipboard() {
+        assert_eq!(build_snapshot_content_identity(None, None), None);
+    }
+
+    #[test]
+    fn user_gets_different_identities_for_same_words_with_different_formatting() {
+        let plain = build_snapshot_content_identity(Some("x"), None);
+        let rich = build_snapshot_content_identity(Some("x"), Some("<b>x</b>"));
+
+        assert_ne!(plain, rich);
+    }
+
+    #[test]
+    fn user_gets_a_fragment_for_every_attachment_kind() {
+        let mut fragments = Vec::new();
+
+        append_payload_attachment_fragments(
+            &mut fragments,
+            &["C:/tmp/a.png".to_string()],
+            &["C:/tmp/b.txt".to_string()],
+        );
+
+        assert_eq!(fragments.len(), 2);
+        assert!(matches!(
+            &fragments[0],
+            ClipboardPayloadFragment::Image { path } if path == "C:/tmp/a.png"
+        ));
+        assert!(matches!(
+            &fragments[1],
+            ClipboardPayloadFragment::File { path } if path == "C:/tmp/b.txt"
+        ));
+    }
+
+    #[test]
+    fn user_gets_no_fragment_when_nothing_was_attached() {
+        let mut fragments = Vec::new();
+
+        append_payload_attachment_fragments(&mut fragments, &[], &[]);
+
+        assert!(fragments.is_empty());
+    }
+
+    #[test]
+    fn user_gets_a_new_auto_paste_sequence_for_each_press() {
+        let first = next_shortcut_auto_paste_seq();
+        let second = next_shortcut_auto_paste_seq();
+
+        // Each press must be distinguishable, so a stale authorisation cannot be reused.
+        assert!(second > first, "{second} should exceed {first}");
+    }
+
+    #[test]
+    fn user_gets_a_wall_clock_time_in_milliseconds() {
+        let now = now_millis();
+
+        // Anything after 2020 is above this bound; the value only needs to be a real timestamp.
+        assert!(now > 1_577_836_800_000, "unexpected timestamp: {now}");
+    }
 
     #[test]
     fn attachment_only_payloads_still_emit_fragments() {

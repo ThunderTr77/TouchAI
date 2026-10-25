@@ -766,6 +766,259 @@ fn redact_urls_with_prefix(input: &str, prefix: &str) -> String {
 mod tests {
     use super::*;
 
+    // A failed browser start is the most common way this feature breaks, and the message is
+    // what the user and the model see. It has to name the local cause, not suggest the site
+    // was unreachable.
+
+    // Error text reaches the logs and the model. A raw loopback endpoint in it leaks the CDP
+    // port, which is enough for anything local to attach to the browser.
+
+    fn tab(id: &str, active: bool) -> BrowserTab {
+        BrowserTab {
+            id: id.to_string(),
+            url: "https://example.com".to_string(),
+            title: "Example".to_string(),
+            active,
+            navigation_token: format!("nav-{id}"),
+        }
+    }
+
+    #[test]
+    fn user_does_not_see_a_loopback_endpoint_in_an_error_message() {
+        let redacted = redact_browser_endpoint_urls(
+            "Failed to query http://127.0.0.1:9222/json/version after 4s",
+        );
+
+        assert!(!redacted.contains("9222"), "port leaked: {redacted}");
+        assert!(redacted.contains("[browser endpoint]"));
+        assert!(redacted.ends_with("after 4s"));
+    }
+
+    #[test]
+    fn user_does_not_see_a_localhost_endpoint_in_an_error_message() {
+        let redacted = redact_browser_endpoint_urls("connect to http://localhost:9333 failed");
+
+        assert!(!redacted.contains("9333"), "port leaked: {redacted}");
+    }
+
+    #[test]
+    fn user_does_not_see_an_ipv6_loopback_endpoint_in_an_error_message() {
+        let redacted = redact_browser_endpoint_urls("connect to http://[::1]:9222 failed");
+
+        assert!(!redacted.contains("9222"), "port leaked: {redacted}");
+    }
+
+    #[test]
+    fn user_gets_every_endpoint_redacted_when_several_appear() {
+        let redacted = redact_browser_endpoint_urls(
+            "http://127.0.0.1:9222 and http://localhost:9333 both failed",
+        );
+
+        assert!(!redacted.contains("9222"));
+        assert!(!redacted.contains("9333"));
+        assert_eq!(redacted.matches("[browser endpoint]").count(), 2);
+    }
+
+    #[test]
+    fn user_gets_an_endpoint_redacted_up_to_its_delimiter() {
+        let redacted = redact_browser_endpoint_urls("(http://127.0.0.1:9222)");
+
+        assert_eq!(redacted, "([browser endpoint])");
+    }
+
+    #[test]
+    fn user_gets_a_message_without_an_endpoint_left_exactly_as_it_was() {
+        let message = "Browser endpoint did not become ready";
+
+        assert_eq!(redact_browser_endpoint_urls(message), message);
+    }
+
+    #[test]
+    fn user_gets_the_referenced_tab_chosen_for_an_action() {
+        let tabs = vec![tab("t1", false), tab("t2", true)];
+
+        let chosen = current_action_tab(&tabs, Some("t1")).expect("the named tab wins");
+
+        assert_eq!(chosen.id, "t1");
+    }
+
+    #[test]
+    fn user_gets_the_active_tab_when_no_tab_was_named() {
+        let tabs = vec![tab("t1", false), tab("t2", true)];
+
+        let chosen = current_action_tab(&tabs, None).expect("the active tab is used");
+
+        assert_eq!(chosen.id, "t2");
+    }
+
+    #[test]
+    fn user_gets_the_first_tab_when_none_is_marked_active() {
+        let tabs = vec![tab("t1", false), tab("t2", false)];
+
+        let chosen = current_action_tab(&tabs, None).expect("the first tab is a fallback");
+
+        assert_eq!(chosen.id, "t1");
+    }
+
+    #[test]
+    fn user_gets_no_tab_when_the_browser_has_none() {
+        assert!(current_action_tab(&[], None).is_none());
+    }
+
+    #[test]
+    fn user_gets_the_reference_token_preferred_for_an_action() {
+        let reference = crate::core::browser::types::BrowserDomRef {
+            ref_id: "ref-0".to_string(),
+            navigation_token: "nav-ref".to_string(),
+            description: "button".to_string(),
+            editable: false,
+            selector: "#a".to_string(),
+            x: 0.0,
+            y: 0.0,
+        };
+        let resolved = actions::BrowserResolvedAction {
+            reference: Some(&reference),
+            form_fields: vec![actions::BrowserResolvedFormField {
+                navigation_token: "nav-field".to_string(),
+                selector: "#b".to_string(),
+                value: "v".to_string(),
+            }],
+            page_navigation_token: None,
+            requires_current_observation: false,
+        };
+
+        assert_eq!(action_navigation_token(&resolved), Some("nav-ref"));
+    }
+
+    #[test]
+    fn user_gets_the_form_field_token_when_there_is_no_reference() {
+        let resolved = actions::BrowserResolvedAction {
+            reference: None,
+            form_fields: vec![actions::BrowserResolvedFormField {
+                navigation_token: "nav-field".to_string(),
+                selector: "#b".to_string(),
+                value: "v".to_string(),
+            }],
+            page_navigation_token: None,
+            requires_current_observation: false,
+        };
+
+        assert_eq!(action_navigation_token(&resolved), Some("nav-field"));
+    }
+
+    #[test]
+    fn user_gets_no_token_for_an_action_with_neither() {
+        let resolved = actions::BrowserResolvedAction {
+            reference: None,
+            form_fields: Vec::new(),
+            page_navigation_token: None,
+            requires_current_observation: false,
+        };
+
+        assert_eq!(action_navigation_token(&resolved), None);
+    }
+
+    #[test]
+    fn user_is_told_a_cdp_readiness_problem_is_local_when_the_endpoint_did_not_answer() {
+        let friendly =
+            friendly_browser_start_error("Failed to query browser endpoint: connection refused");
+
+        assert!(friendly.contains("local Chrome/Edge startup"));
+        assert!(friendly.contains("not evidence of an external website"));
+    }
+
+    #[test]
+    fn user_is_told_a_cdp_readiness_problem_is_local_when_the_endpoint_never_became_ready() {
+        let friendly = friendly_browser_start_error("Browser endpoint did not become ready");
+
+        assert!(friendly.contains("local Chrome/Edge startup"));
+    }
+
+    #[test]
+    fn user_is_told_a_cdp_readiness_problem_is_local_when_the_version_payload_was_wrong() {
+        let friendly =
+            friendly_browser_start_error("Browser endpoint did not return valid /json/version");
+
+        assert!(friendly.contains("local Chrome/Edge startup"));
+    }
+
+    #[test]
+    fn user_is_told_a_cdp_readiness_problem_is_local_when_no_websocket_was_exposed() {
+        let friendly =
+            friendly_browser_start_error("Browser endpoint did not expose webSocketDebuggerUrl");
+
+        assert!(friendly.contains("local Chrome/Edge startup"));
+    }
+
+    #[test]
+    fn user_gets_an_unrelated_error_left_as_it_was() {
+        // A missing executable is not a CDP problem and must not be described as one.
+        let friendly = friendly_browser_start_error("Failed to spawn browser process");
+
+        assert_eq!(friendly, "Failed to spawn browser process");
+    }
+
+    #[test]
+    fn user_gets_the_original_detail_appended_to_a_readiness_message() {
+        let friendly = friendly_browser_start_error("Browser endpoint returned an error: 500");
+
+        assert!(friendly.ends_with("Detail: Browser endpoint returned an error: 500"));
+    }
+
+    #[test]
+    fn user_gets_no_fingerprint_configuration_when_the_mode_is_off() {
+        let request = BrowserStartRequest {
+            fingerprint_mode: Some(BrowserFingerprintMode::Off),
+            fingerprint_locale: Some("en-US".to_string()),
+            ..Default::default()
+        };
+
+        assert!(fingerprint_config_from_request(&request).is_none());
+    }
+
+    #[test]
+    fn user_gets_a_dash_prefixed_locale_dropped_from_the_fingerprint_config() {
+        let request = BrowserStartRequest {
+            fingerprint_mode: Some(BrowserFingerprintMode::Balanced),
+            fingerprint_locale: Some("--headless".to_string()),
+            fingerprint_stealth_script: Some(true),
+            ..Default::default()
+        };
+
+        let config = fingerprint_config_from_request(&request).expect("stealth keeps a config");
+
+        assert_eq!(config.locale, None);
+        assert!(config.stealth_script);
+    }
+
+    #[test]
+    fn user_gets_a_locale_containing_a_nul_dropped_from_the_fingerprint_config() {
+        let request = BrowserStartRequest {
+            fingerprint_mode: Some(BrowserFingerprintMode::Balanced),
+            fingerprint_locale: Some("a\u{0000}b".to_string()),
+            fingerprint_stealth_script: Some(true),
+            ..Default::default()
+        };
+
+        let config = fingerprint_config_from_request(&request).expect("stealth keeps a config");
+
+        assert_eq!(config.locale, None);
+    }
+
+    #[test]
+    fn user_gets_a_plain_locale_trimmed_in_the_fingerprint_config() {
+        let request = BrowserStartRequest {
+            fingerprint_mode: Some(BrowserFingerprintMode::Balanced),
+            fingerprint_locale: Some("  en-US  ".to_string()),
+            fingerprint_stealth_script: Some(true),
+            ..Default::default()
+        };
+
+        let config = fingerprint_config_from_request(&request).expect("a config is built");
+
+        assert_eq!(config.locale.as_deref(), Some("en-US"));
+    }
+
     #[test]
     fn stop_invalidates_in_flight_start_generation() {
         let runtime = BrowserRuntime::new();
