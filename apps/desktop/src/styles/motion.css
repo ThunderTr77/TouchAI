@@ -233,24 +233,36 @@
         opacity: 0;
     }
 }
+/*
+ * `scale` rather than `transform: scale()`.
+ *
+ * Animating `transform` replaces whatever transform the element already carries, and
+ * `animation-fill-mode: both` keeps it replaced after the animation ends. That is not
+ * theoretical: the dialogs used to be centred with `translate-x-[-50%] translate-y-[-50%]`,
+ * which lives in `transform`, so every dialog settled in the top-left corner once the
+ * keyframes won. The dialogs now centre with `inset-0 m-auto` and no longer depend on
+ * `transform`, but the rule stays as it is: the standalone `scale` property composes with
+ * any transform instead of overwriting it, so a future element that does use one cannot
+ * reintroduce the bug.
+ */
 @keyframes t-modal-in {
     from {
         opacity: 0;
-        transform: scale(var(--scale-large));
+        scale: var(--scale-large);
     }
     to {
         opacity: 1;
-        transform: scale(1);
+        scale: 1;
     }
 }
 @keyframes t-modal-out {
     from {
         opacity: 1;
-        transform: scale(1);
+        scale: 1;
     }
     to {
         opacity: 0;
-        transform: scale(var(--scale-small));
+        scale: var(--scale-small);
     }
 }
 @keyframes t-dropdown-in {
