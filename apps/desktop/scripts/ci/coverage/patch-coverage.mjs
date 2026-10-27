@@ -1,5 +1,7 @@
 // Copyright (c) 2026. 千诚. Licensed under GPL v3
 
+import { posix, win32 } from 'node:path';
+
 /**
  * Patch coverage: the share of the lines this change touched that the suite exercises.
  *
@@ -112,13 +114,18 @@ export function measurePatchCoverage(changedLines, coverageReport, options = {})
 
     // The report keys are absolute paths; the diff keys are repo-relative. Index the report by
     // its repo-relative suffix so the two can be matched regardless of where the checkout lives.
-    // With `root: '.'` the keys are already relative, so no prefix is stripped.
-    const trimmedRoot = normalise(repoRoot).replace(/^\.\//, '').replace(/^\.$/, '').replace(/\/$/, '');
-    const prefix = trimmedRoot ? `/${trimmedRoot}/` : null;
+    const configuredRoot = normalise(repoRoot).replace(/^\.\//, '');
+    const root = !configuredRoot || configuredRoot === '.' ? normalise(process.cwd()) : configuredRoot;
+    const absoluteRoot = posix.isAbsolute(root) || win32.isAbsolute(root);
+    const prefix = `${absoluteRoot ? '' : '/'}${root.replace(/\/+$/, '')}/`;
     const byRelativePath = new Map();
     for (const [absolute, fileCoverage] of Object.entries(coverageReport)) {
         const normalisedAbsolute = normalise(absolute);
-        const index = prefix ? normalisedAbsolute.lastIndexOf(prefix) : -1;
+        const index = absoluteRoot
+            ? normalisedAbsolute.startsWith(prefix)
+                ? 0
+                : -1
+            : normalisedAbsolute.lastIndexOf(prefix);
         const relative =
             index >= 0 ? normalisedAbsolute.slice(index + prefix.length) : normalisedAbsolute;
         byRelativePath.set(relative, fileCoverage);

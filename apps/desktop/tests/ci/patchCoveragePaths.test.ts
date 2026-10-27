@@ -1,0 +1,104 @@
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+
+import { describe, expect, it } from 'vitest';
+
+import { measurePatchCoverage } from '../../scripts/ci/coverage/patch-coverage.mjs';
+
+const sourcePath = 'apps/desktop/src/feature.ts';
+const changed = new Map([[sourcePath, new Set([2])]]);
+
+function coverageFor(hits = 1) {
+    return {
+        statementMap: {
+            0: { start: { line: 2, column: 0 }, end: { line: 2, column: 23 } },
+        },
+        s: { 0: hits },
+        branchMap: {},
+        b: {},
+    };
+}
+
+describe('user measures covered changes with absolute report paths', () => {
+    it.each([
+        ['/checkout/repo', '/checkout/repo/apps/desktop/src/feature.ts'],
+        ['C:\\checkout\\repo', 'C:\\checkout\\repo\\apps\\desktop\\src\\feature.ts'],
+    ])('user gets full coverage when the repository root is %s', (repoRoot, file) => {
+        const result = measurePatchCoverage(changed, { [file]: coverageFor() }, { repoRoot });
+
+        expect(result).toMatchObject({ total: 1, covered: 1, percent: 100 });
+    });
+
+    it('user gets full coverage when the current repository directory is the root', () => {
+        const file = resolve(sourcePath);
+        const result = measurePatchCoverage(changed, { [file]: coverageFor() }, { repoRoot: '.' });
+
+        expect(result).toMatchObject({ total: 1, covered: 1, percent: 100 });
+    });
+
+    it('user still gets a failed gate when the matching statement did not run', () => {
+        const result = measurePatchCoverage(
+            changed,
+            { '/checkout/repo/apps/desktop/src/feature.ts': coverageFor(0) },
+            { repoRoot: '/checkout/repo' }
+        );
+
+        expect(result).toMatchObject({ total: 1, covered: 0, percent: 0 });
+    });
+
+    it('user does not count coverage from a different checkout as covering a missing file', () => {
+        const result = measurePatchCoverage(
+            changed,
+            { '/other/repo/apps/desktop/src/feature.ts': coverageFor() },
+            { repoRoot: '/checkout/repo' }
+        );
+
+        expect(result).toMatchObject({ total: 1, covered: 0, percent: 0 });
+    });
+});
+
+describe('user runs the patch coverage command in a checkout', () => {
+    it.each(['.', 'apps/desktop'])(
+        'user gets the actual changed line covered when running from %s',
+        (directory) => {
+            const cli = resolve('scripts/ci/coverage/patch-coverage-cli.mjs');
+            const checkout = mkdtempSync(join(tmpdir(), 'patch-coverage-paths-'));
+            const git = (...args: string[]) =>
+                execFileSync('git', args, { cwd: checkout, encoding: 'utf8', stdio: 'pipe' });
+
+            try {
+                const source = join(checkout, sourcePath);
+                mkdirSync(join(checkout, 'apps/desktop/src'), { recursive: true });
+                writeFileSync(source, 'export const initial = 1;\n');
+                git('init');
+                git('add', '--', sourcePath);
+                git(
+                    '-c',
+                    'user.name=Test Fixture',
+                    '-c',
+                    'user.email=fixture@example.com',
+                    'commit',
+                    '-m',
+                    'test: initialize coverage fixture'
+                );
+                const base = git('rev-parse', 'HEAD').trim();
+                writeFileSync(source, 'export const initial = 1;\nexport const added = 2;\n');
+                const report = join(checkout, 'coverage-final.json');
+                writeFileSync(report, JSON.stringify({ [source]: coverageFor() }));
+
+                const result = spawnSync(
+                    process.execPath,
+                    [cli, '--coverage', report, '--base', base, '--root', '.', '--floor', '85'],
+                    { cwd: join(checkout, directory), encoding: 'utf8' }
+                );
+
+                expect(result.status, result.stderr).toBe(0);
+                expect(result.stdout).toContain('1/1 changed lines covered (100.00%)');
+            } finally {
+                rmSync(checkout, { recursive: true, force: true });
+            }
+        }
+    );
+});
