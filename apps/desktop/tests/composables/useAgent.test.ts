@@ -199,3 +199,19 @@ describe('when the user reopens a conversation that switched models', () => {
         mounted.unmount();
     });
 });
+
+describe('when the user answers a tool approval with nothing attached', () => {
+    it('user gets the answer refused rather than sent to a task that is gone', async () => {
+        const mounted = await mountComposable(() => useAgent());
+
+        // No task is attached, so every answer path has to decline instead of reaching the
+        // backend; the dialog stays open and the user is not told the click was accepted.
+        expect(mounted.result.approvePendingToolApproval('call-1')).toBe(false);
+        expect(mounted.result.rejectPendingToolApproval('call-1')).toBe(false);
+        expect(mounted.result.settleUserQuestion('call-1', null)).toBe(false);
+        expect(sessionTaskCenterMock.approveTaskToolCall).not.toHaveBeenCalled();
+        expect(sessionTaskCenterMock.rejectTaskToolCall).not.toHaveBeenCalled();
+
+        mounted.unmount();
+    });
+});

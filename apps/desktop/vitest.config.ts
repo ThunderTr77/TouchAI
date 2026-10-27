@@ -20,7 +20,9 @@ export default defineConfig({
     setupFiles: ['./tests/setup/vitest.ts'],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'html', 'json-summary', 'lcov'],
+      // `json` feeds the patch-coverage gate (the lines this change touched); the others
+      // feed the step summary, the uploaded artifact and local browsing.
+      reporter: ['text', 'html', 'json-summary', 'json', 'lcov'],
       reportsDirectory: './.coverage/unit',
       include: ['src/**/*.{ts,vue}'],
       exclude: [
@@ -44,10 +46,10 @@ export default defineConfig({
         // rewrites a number only when the measured value exceeds it, so a metric can never
         // be lowered this way and a drop below the committed value fails CI.
         // See docs/testing/testing.md.
-        statements: 80,
-        branches: 70,
-        functions: 79,
-        lines: 80,
+        statements: 90,
+        branches: 84,
+        functions: 88,
+        lines: 91,
         'src/services/EventService/**/*.ts': {
           statements: 90,
           branches: 100,

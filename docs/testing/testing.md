@@ -73,14 +73,24 @@ Frontend floor in `apps/desktop/vitest.config.ts`:
 
 | Metric | Floor | Now | Target |
 | --- | ---: | ---: | ---: |
-| Statements | 77% | 77.6% | 85% |
-| Branches | 67% | 67.8% | 85% |
-| Functions | 76% | 76.4% | 85% |
-| Lines | 78% | 78.1% | 85% |
+| Statements | 90% | 91.0% | 85% |
+| Branches | 84% | 84.9% | 85% |
+| Functions | 88% | 88.8% | 85% |
+| Lines | 91% | 91.5% | 85% |
+
+Statements, functions and lines are past the 85% target. Branches sit just under it: what remains are guards that cannot be reached from outside their module (dead code, base-class defaults that every adapter overrides, and nullish fallbacks behind columns already wrapped in `coalesce`). Those are reported rather than faked with tests that would pass with the implementation deleted.
 
 The keys must stay at the top level of `thresholds`. A nested `global` object is read as a glob pattern matching no file, which leaves the gate silently inert.
 
 **Raising is one-way.** Run `pnpm test:coverage:raise` after a change that earns it; it is vitest's `thresholds.autoUpdate`, which rewrites a metric only when the measured value exceeds it. Run it on the full suite, not a filtered subset, or it ratchets to the subset. It also rewrites the per-file thresholds to exact measured values with no headroom, so raise the global floor by hand when the per-file numbers should keep their slack.
+
+**The floor alone is not enough for a pull request.** A global percentage cannot see a change that adds 400 uncovered lines while covering 400 old ones: the total stays flat and the gate stays green. So the `frontend-tests` job also runs a **patch coverage** check (`scripts/ci/coverage/patch-coverage.mjs`), which takes the lines the diff added to `apps/desktop/src` and asks the v8 report how many of them ran. It fails below **85%**.
+
+- A changed source file that no test ever loaded counts as fully uncovered, which is the point: new behaviour has to arrive with a test that exercises it.
+- Blank lines, comments and closing braces carry no statement, so they are skipped rather than counted as failures.
+- Deleted lines, test files and scripts are out of scope.
+- Run it locally with `pnpm test:coverage:patch` after `pnpm test:coverage`.
+- The floor lives in the workflow step, not in a config file, because it is a policy number rather than a measured one.
 
 Rust floor in `apps/desktop/src-tauri/coverage-floors.json`, from **cargo-llvm-cov** (rustc's own `-C instrument-coverage`, not a ptrace debugger). It reports line and region coverage; region is the finer signal because it flags an expression that was only partly evaluated.
 
