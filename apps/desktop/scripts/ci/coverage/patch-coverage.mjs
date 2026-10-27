@@ -117,8 +117,10 @@ export function measurePatchCoverage(changedLines, coverageReport, options = {})
     const configuredRoot = normalise(repoRoot).replace(/^\.\//, '');
     const root = !configuredRoot || configuredRoot === '.' ? normalise(process.cwd()) : configuredRoot;
     const absoluteRoot = posix.isAbsolute(root) || win32.isAbsolute(root);
+    const explicitAbsoluteRoot = posix.isAbsolute(configuredRoot) || win32.isAbsolute(configuredRoot);
     const prefix = `${absoluteRoot ? '' : '/'}${root.replace(/\/+$/, '')}/`;
     const byRelativePath = new Map();
+    const normalisedEntries = [];
     for (const [absolute, fileCoverage] of Object.entries(coverageReport)) {
         const normalisedAbsolute = normalise(absolute);
         const index = absoluteRoot
@@ -129,7 +131,33 @@ export function measurePatchCoverage(changedLines, coverageReport, options = {})
         const relative =
             index >= 0 ? normalisedAbsolute.slice(index + prefix.length) : normalisedAbsolute;
         byRelativePath.set(relative, fileCoverage);
+        normalisedEntries.push([normalisedAbsolute, fileCoverage]);
     }
+
+    // Relative roots allow portable reports; an explicit absolute root must not
+    // fall back to a different checkout with the same source-file suffix.
+    const findCoverage = (path) => {
+        const relative = normalise(path);
+        const indexed = byRelativePath.get(relative);
+
+        if (indexed) {
+            return indexed;
+        }
+
+        if (explicitAbsoluteRoot) {
+            return undefined;
+        }
+
+        const suffix = `/${relative}`;
+
+        for (const [absolute, fileCoverage] of normalisedEntries) {
+            if (absolute.endsWith(suffix)) {
+                return fileCoverage;
+            }
+        }
+
+        return undefined;
+    };
 
     let total = 0;
     let covered = 0;
@@ -140,7 +168,7 @@ export function measurePatchCoverage(changedLines, coverageReport, options = {})
             continue;
         }
 
-        const fileCoverage = byRelativePath.get(normalise(path));
+        const fileCoverage = findCoverage(path);
         // A changed source file that never appears in the report was never loaded by a test.
         const measured = fileCoverage
             ? measureFile(fileCoverage, lines)

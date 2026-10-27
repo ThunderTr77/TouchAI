@@ -60,9 +60,14 @@ describe('user measures covered changes with absolute report paths', () => {
 });
 
 describe('user runs the patch coverage command in a checkout', () => {
-    it.each(['.', 'apps/desktop'])(
-        'user gets the actual changed line covered when running from %s',
-        (directory) => {
+    it.each([
+        ['.', 1, 0, '1/1 changed lines covered (100.00%)'],
+        ['apps/desktop', 1, 0, '1/1 changed lines covered (100.00%)'],
+        ['.', 0, 1, '0/1 changed lines covered (0.00%)'],
+        ['apps/desktop', 0, 1, '0/1 changed lines covered (0.00%)'],
+    ] as const)(
+        'user gets a measured coverage gate from %s when the changed statement has %i hits',
+        (directory, hits, expectedStatus, expectedSummary) => {
             const cli = resolve('scripts/ci/coverage/patch-coverage-cli.mjs');
             const checkout = mkdtempSync(join(tmpdir(), 'patch-coverage-paths-'));
             const git = (...args: string[]) =>
@@ -86,7 +91,7 @@ describe('user runs the patch coverage command in a checkout', () => {
                 const base = git('rev-parse', 'HEAD').trim();
                 writeFileSync(source, 'export const initial = 1;\nexport const added = 2;\n');
                 const report = join(checkout, 'coverage-final.json');
-                writeFileSync(report, JSON.stringify({ [source]: coverageFor() }));
+                writeFileSync(report, JSON.stringify({ [source]: coverageFor(hits) }));
 
                 const result = spawnSync(
                     process.execPath,
@@ -94,8 +99,8 @@ describe('user runs the patch coverage command in a checkout', () => {
                     { cwd: join(checkout, directory), encoding: 'utf8' }
                 );
 
-                expect(result.status, result.stderr).toBe(0);
-                expect(result.stdout).toContain('1/1 changed lines covered (100.00%)');
+                expect(result.status, result.stderr).toBe(expectedStatus);
+                expect(result.stdout).toContain(expectedSummary);
             } finally {
                 rmSync(checkout, { recursive: true, force: true });
             }
