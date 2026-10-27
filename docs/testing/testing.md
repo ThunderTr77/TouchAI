@@ -157,6 +157,8 @@ apps/desktop/src-tauri/tests/ # Rust integration / command tests
 
 **Desktop E2E.** Critical cross-layer flows only (launch, search, settings). Do not use E2E for logic unit tests already cover reliably.
 
+**Visual regression.** Component primitives (`pnpm test:visual`) and application windows (`pnpm test:e2e`) are compared against committed PNG baselines in CI; regenerate an intended difference with `/approve-visuals` on the pull request.
+
 ## Naming Tests
 
 Every test is a user story in Given / When / Then form, readable by a user or PM without opening the source.
