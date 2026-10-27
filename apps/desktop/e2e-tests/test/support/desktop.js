@@ -26,17 +26,20 @@ export async function waitForE2eBridge(timeoutMs = DEFAULT_TIMEOUT_MS) {
 }
 
 export async function callE2eBridge(methodName, ...args) {
-    const result = await browser.executeAsync(
-        (name, bridgeArgs, done) => {
+    // WebdriverIO 10 removed executeAsync; execute now awaits async scripts.
+    const result = await browser.execute(
+        async (name, bridgeArgs) => {
             const bridge = window.__TOUCHAI_E2E__;
             if (!bridge || typeof bridge[name] !== 'function') {
-                done({ ok: false, error: `E2E bridge method "${name}" is not available.` });
-                return;
+                return { ok: false, error: `E2E bridge method "${name}" is not available.` };
             }
 
-            Promise.resolve(bridge[name](...bridgeArgs))
-                .then(() => done({ ok: true }))
-                .catch((error) => done({ ok: false, error: String(error) }));
+            try {
+                await bridge[name](...bridgeArgs);
+                return { ok: true };
+            } catch (error) {
+                return { ok: false, error: String(error) };
+            }
         },
         methodName,
         args
@@ -107,6 +110,28 @@ export async function switchToWindowContaining(urlFragment, timeoutMs = DEFAULT_
     }
 
     return matchedHandle;
+}
+
+/**
+ * Switch back to the search window and keep re-asserting the switch until its
+ * E2E bridge answers. WebdriverIO 10 selects the first remaining handle in the
+ * background after closeWindow(); that selection can land after an explicit
+ * switch and leave the driver on a blank page.
+ */
+export async function switchToWindowWithE2eBridge(handle, timeoutMs = DEFAULT_TIMEOUT_MS) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+        await browser.switchToWindow(handle);
+
+        if (await browser.execute(() => Boolean(window.__TOUCHAI_E2E__))) {
+            return;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
+    throw new Error('The search window did not become current after closing settings.');
 }
 
 export async function getAriaChecked(element) {
