@@ -89,6 +89,23 @@ describe('user opens a pull request that runs the preview', () => {
         expect(recordPackages.has('libwebkit2gtk-4.1-dev')).toBe(true);
     });
 
+    it('user gets the app state printed when the recording session never starts', () => {
+        const record = jobBlock('record');
+        const report = record.slice(record.indexOf('- name: Report the app state'));
+
+        // A session that never registers looks the same whether the app crashed
+        // or stalled, so the job has to print what it can observe.
+        expect(report).toContain('if: failure()');
+        expect(report).toContain('tauri-driver');
+        expect(report).toContain('tail -n 40');
+
+        // The report reads the app root, so it must come from the job env rather
+        // than the recording step's own env.
+        expect(report).not.toContain('env:');
+        expect(record).toContain('TOUCHAI_APP_ROOT: ${{ runner.temp }}/ui-preview-app-root');
+        expect(record).toContain('echo "TOUCHAI_APP_ROOT=$TOUCHAI_APP_ROOT" >> "$GITHUB_ENV"');
+    });
+
     it('user gets the model key only in a job that does not run pull-request code', () => {
         const plan = jobBlock('plan');
 
