@@ -33,7 +33,7 @@ pub(super) struct ShortcutRecord {
     pub(super) target_name: Option<String>,
     pub(super) target_path: Option<String>,
     pub(super) target_norm: String,
-    pub(super) modified_secs: u64,
+    pub(super) modified_nanos: u128,
     pub(super) file_size: u64,
 }
 
@@ -41,7 +41,7 @@ pub(super) struct ShortcutRecord {
 pub(super) struct PendingTargetResolve {
     pub(super) path: String,
     pub(super) path_norm: String,
-    pub(super) modified_secs: u64,
+    pub(super) modified_nanos: u128,
     pub(super) file_size: u64,
 }
 
@@ -49,8 +49,8 @@ pub(super) struct PendingTargetResolve {
 pub(crate) struct ResolvedTargetUpdate {
     //归一化快捷方式路径。
     pub(crate) path_norm: String,
-    //快捷方式最近修改时间戳（秒）。
-    pub(crate) modified_secs: u64,
+    // Shortcut modification time in Unix nanoseconds.
+    pub(crate) modified_nanos: u128,
     //快捷方式文件大小（字节）。
     pub(crate) file_size: u64,
     //解析出的目标名称。
@@ -61,8 +61,8 @@ pub(crate) struct ResolvedTargetUpdate {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TargetCacheEntry {
-    //快捷方式最近修改时间戳（秒）。
-    pub(crate) modified_secs: u64,
+    // Shortcut modification time in Unix nanoseconds.
+    pub(crate) modified_nanos: u128,
     //快捷方式文件大小（字节）。
     pub(crate) file_size: u64,
     //缓存的目标名称。
