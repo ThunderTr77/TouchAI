@@ -406,15 +406,6 @@ mod tests {
         }
     }
 
-    fn cache_in(dir: &TempDir) -> ClipboardImageCache {
-        let image_dir = dir.path().join("cache");
-        fs::create_dir_all(&image_dir).expect("cache directory");
-        ClipboardImageCache {
-            image_dir,
-            http_client: HttpClient::new(),
-        }
-    }
-
     // Clipboard images arrive as data URLs, as file paths, or as raw bytes with an unknown
     // extension. Getting the classification wrong means an image is dropped or, worse, a
     // non-image file is handed to the image pipeline.
@@ -811,5 +802,14 @@ mod tests {
         push_unique(&mut values, "b".to_string());
 
         assert_eq!(values, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    fn cache_in(dir: &TempDir) -> ClipboardImageCache {
+        let image_dir = dir.path().join("cache");
+        fs::create_dir_all(&image_dir).expect("cache directory");
+        ClipboardImageCache {
+            image_dir,
+            http_client: HttpClient::new(),
+        }
     }
 }
