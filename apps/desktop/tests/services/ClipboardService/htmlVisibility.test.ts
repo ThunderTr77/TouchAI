@@ -61,7 +61,7 @@ describe('user pastes HTML with inline visibility styles', () => {
         expect(payload?.text).toBe('Visible text');
     });
 
-    it.each(['opacity: 0', 'opacity: 0%', 'display: none', 'visibility: hidden'])(
+    it.each(['opacity: 0', 'opacity: 0%', 'opacity: -0.5', 'display: none', 'visibility: hidden'])(
         'user excludes hidden text when its inline style is %s',
         (style) => {
             const payload = normalizeClipboardPayload(

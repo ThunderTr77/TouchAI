@@ -474,7 +474,7 @@ function isHiddenInlineStyle(style: string): boolean {
     return (
         declaration.display === 'none' ||
         declaration.visibility === 'hidden' ||
-        parseFloat(declaration.opacity) === 0
+        parseFloat(declaration.opacity) <= 0
     );
 }
 
