@@ -1,12 +1,13 @@
 use log::LevelFilter;
-use std::path::PathBuf;
 use tauri::plugin::TauriPlugin;
 use tauri::Runtime;
 use tauri_plugin_log::fern::colors::{Color, ColoredLevelConfig};
 use tauri_plugin_log::{Builder, RotationStrategy, Target, TargetKind, TimezoneStrategy};
 use time::macros::format_description;
+use time::OffsetDateTime;
 
 use super::paths::{app_directory_path, AppDirectory};
+use crate::core::observability::format::format_line;
 
 const DEFAULT_LOG_LEVEL: LevelFilter = LevelFilter::Info;
 const LOG_FILE_NAME: &str = "TouchAI";
@@ -114,59 +115,52 @@ fn build_stdout_target(timezone_strategy: TimezoneStrategy) -> Target {
 }
 
 /// 构建文件输出目标（无颜色）
-fn build_file_target(timezone_strategy: TimezoneStrategy) -> Target {
-    let date_format = format_description!("[year]-[month]-[day]");
-    let time_format = format_description!("[hour]:[minute]:[second]");
-
-    let logs_path = app_directory_path(AppDirectory::Logs).unwrap_or_else(|error| {
-        eprintln!(
-            "[logging] Failed to resolve logs directory from init module: {}. Falling back to current directory.",
-            error
-        );
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    });
-
+fn build_file_target(logs_path: std::path::PathBuf) -> Target {
     Target::new(TargetKind::Folder {
         path: logs_path,
         file_name: Some(LOG_FILE_NAME.into()),
     })
-    .format(move |out, message, record| {
-        let now = timezone_strategy.get_now();
-        let date = now.format(&date_format).unwrap_or_default();
-        let time = now.format(&time_format).unwrap_or_default();
-        let level = record.level();
-        let (target, location) = split_webview_target(record.target());
-
-        match location {
-            Some(location) => {
-                let (label, location_path) = split_webview_location(location);
-                let target_label = format_target_label(target, label);
-                out.finish(format_args!(
-                    "[{date}][{time}][{level}][{target_label}][{location_path}] {message}"
-                ));
-            }
-            None => {
-                out.finish(format_args!(
-                    "[{date}][{time}][{level}][{target}] {message}"
-                ));
-            }
-        }
+    .format(|out, message, record| {
+        out.finish(format_args!(
+            "{}",
+            format_line(
+                record.level(),
+                record.target(),
+                &message.to_string(),
+                OffsetDateTime::now_utc()
+            )
+        ))
     })
 }
 
 /// 构建 Tauri 日志插件
 pub fn build_plugin<R: Runtime>() -> TauriPlugin<R> {
-    let timezone_strategy = TimezoneStrategy::UseLocal;
+    let timezone_strategy = TimezoneStrategy::UseUtc;
+    let startup_level = resolve_log_level();
+    crate::core::observability::level::initialize(startup_level);
+    let logs_path = app_directory_path(AppDirectory::Logs).unwrap_or_else(|error| {
+        eprintln!(
+            "[logging] Failed to resolve logs directory from init module: {}. Falling back to current directory.",
+            error
+        );
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
+    crate::core::observability::initialize_run_id();
+    let logs_path = crate::core::observability::initialize(&logs_path);
 
     let mut targets = vec![build_stdout_target(timezone_strategy.clone())];
 
     // 生产环境启用文件日志
     if !cfg!(debug_assertions) {
-        targets.push(build_file_target(timezone_strategy.clone()));
+        targets.push(build_file_target(logs_path));
     }
 
     Builder::new()
-        .level(resolve_log_level())
+        // 分发层固定接收 Trace，级别取舍由 `level::allows` 做。
+        // `Builder::level` 是 fern 分发层的过滤器：这里写死启动级别会让
+        // 诊断模式打开的 debug 日志在到达任何 target 之前就被丢掉。
+        .level(log::LevelFilter::Trace)
+        .filter(|record| crate::core::observability::level::allows(record.level()))
         .rotation_strategy(RotationStrategy::KeepSome(MAX_ARCHIVED_FILES))
         .timezone_strategy(timezone_strategy)
         .clear_format()
@@ -256,7 +250,7 @@ mod tests {
         // Both targets must construct without panicking; their internals are private to the
         // plugin, so building them is the observable contract.
         let _console = build_stdout_target(TimezoneStrategy::UseLocal);
-        let _file = build_file_target(TimezoneStrategy::UseLocal);
-        let _utc = build_file_target(TimezoneStrategy::UseUtc);
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let _file = build_file_target(directory.path().to_path_buf());
     }
 }

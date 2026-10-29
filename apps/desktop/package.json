@@ -36,7 +36,10 @@
         "db:studio": "drizzle-kit studio",
         "update:model-metadata": "node ./scripts/update-model-metadata.mjs",
         "test:coverage:patch": "node ./scripts/ci/coverage/patch-coverage-cli.mjs --coverage .coverage/unit/coverage-final.json --base origin/main --root . --floor 85",
-        "test:e2e:visual:update": "node ./scripts/run-e2e-command.mjs --update-baselines"
+        "test:e2e:visual:update": "node ./scripts/run-e2e-command.mjs --update-baselines",
+        "storybook": "storybook dev --port 6006",
+        "test:visual:components": "playwright test",
+        "test:visual:components:update": "playwright test --update-snapshots"
     },
     "dependencies": {
         "@ai-sdk/alibaba": "^1.0.62",
@@ -48,6 +51,9 @@
         "@ai-sdk/openai-compatible": "^2.0.81",
         "@ai-sdk/xai": "^3.0.139",
         "@mozilla/readability": "^0.6.0",
+        "@opentelemetry/api": "1.9.1",
+        "@opentelemetry/context-zone-peer-dep": "2.12.0",
+        "@opentelemetry/sdk-trace": "2.12.0",
         "@tailwindcss/vite": "^4.3.3",
         "@tauri-apps/api": "~2.12.0",
         "@tauri-apps/plugin-dialog": "~2.7.1",
@@ -90,7 +96,8 @@
         "vue-router": "5.2.0",
         "vue-sonner": "^2.0.9",
         "zhipu-ai-provider": "^0.3.1",
-        "zod": "4.6.7"
+        "zod": "4.6.7",
+        "zone.js": "0.15.1"
     },
     "devDependencies": {
         "@commitlint/cli": "^21.2.3",
@@ -136,8 +143,11 @@
         "vue-eslint-parser": "^10.4.1",
         "vue-tsc": "^3.3.12",
         "webdriverio": "^10.1.0",
-        "@wdio/visual-service": "^11.0.0",
-        "undici": "8.12.3"
+"@wdio/visual-service": "^11.0.0",
+        "undici": "8.12.3",
+        "@playwright/test": "1.64.1",
+        "@storybook/vue3-vite": "10.6.3",
+        "storybook": "10.6.3"
     },
     "keywords": [
         "ai",

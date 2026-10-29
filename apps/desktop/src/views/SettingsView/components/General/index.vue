@@ -4,6 +4,7 @@
     import SettingsRow from '@components/SettingsRow.vue';
     import { Switch } from '@components/ui/switch';
     import { native } from '@services/NativeService';
+    import { log } from '@services/ObservabilityService';
     import { storeToRefs } from 'pinia';
     import { computed, onMounted, ref, watch } from 'vue';
 
@@ -14,6 +15,7 @@
     import { type AppLocale, LOCALE_LABELS, SUPPORTED_LOCALES, t } from '@/i18n';
     import { type OutputScrollBehavior, useSettingsStore } from '@/stores/settings';
 
+    import DiagnosticsSection from './DiagnosticsSection.vue';
     import UpdateAvailableBadge from './UpdateAvailableBadge.vue';
     import UpdateSettingsSection from './UpdateSettingsSection.vue';
 
@@ -93,7 +95,7 @@
         try {
             await settingsStore.initialize();
         } catch (error) {
-            console.error('Failed to load settings:', error);
+            log.error('Failed to load settings:', error);
             alertMessage.value?.error(t('settings.general.loadSettingsFailed'), 3000);
         }
     };
@@ -108,7 +110,7 @@
 
             await settingsStore.updateStartOnBoot(settings.value.startOnBoot);
         } catch (error) {
-            console.error('Failed to save start_on_boot setting:', error);
+            log.error('Failed to save start_on_boot setting:', error);
             alertMessage.value?.error(t('settings.general.saveStartOnBootFailed'), 3000);
         }
     };
@@ -117,7 +119,7 @@
         try {
             await settingsStore.updateStartMinimized(settings.value.startMinimized);
         } catch (error) {
-            console.error('Failed to save start_minimized setting:', error);
+            log.error('Failed to save start_minimized setting:', error);
             alertMessage.value?.error(t('settings.general.saveSettingsFailed'), 3000);
         }
     };
@@ -127,7 +129,7 @@
             await settingsStore.updateOutputScrollBehavior(settings.value.outputScrollBehavior);
             alertMessage.value?.success(t('common.saved'), 2000);
         } catch (error) {
-            console.error('Failed to save output_scroll_behavior setting:', error);
+            log.error('Failed to save output_scroll_behavior setting:', error);
             alertMessage.value?.error(t('settings.general.saveSettingsFailed'), 3000);
         }
     };
@@ -141,7 +143,7 @@
 
             alertMessage.value?.success(t('settings.general.searchWindowSizeUpdated'), 2000);
         } catch (error) {
-            console.error('Failed to save search window size preset:', error);
+            log.error('Failed to save search window size preset:', error);
             alertMessage.value?.error(t('settings.general.saveSearchWindowSizeFailed'), 3000);
         }
     };
@@ -152,7 +154,7 @@
             pendingLanguage.value = settings.value.language;
             alertMessage.value?.success(t('common.saved'), 2000);
         } catch (error) {
-            console.error('Failed to save language setting:', error);
+            log.error('Failed to save language setting:', error);
             alertMessage.value?.error(t('settings.general.saveLanguageFailed'), 3000);
             pendingLanguage.value = settings.value.language;
         }
@@ -168,7 +170,7 @@
                 await settingsStore.updateStartOnBoot(isEnabled);
             }
         } catch (error) {
-            console.error('Failed to check autostart status:', error);
+            log.error('Failed to check autostart status:', error);
         }
     });
 </script>
@@ -307,6 +309,8 @@
                     </SettingsRow>
                 </div>
             </section>
+
+            <DiagnosticsSection />
 
             <UpdateSettingsSection ref="updateSettingsSection" />
         </div>
