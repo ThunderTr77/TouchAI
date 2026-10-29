@@ -7,6 +7,7 @@
 
 mod client;
 mod client_manager;
+pub(crate) mod redact;
 pub mod types;
 
 pub use client_manager::McpClientManager;
