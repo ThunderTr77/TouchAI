@@ -38,8 +38,26 @@ pub(crate) fn format_line(
     if target == OBS_TARGET {
         format!("{timestamp} {} {body}", level_label(level))
     } else {
-        format!("{timestamp} {} {target} {body}", level_label(level))
+        // 每行都带 run，跨运行关联不必依赖头部记录的位置。
+        format!(
+            "{timestamp} {} {target} run={} {body}{}",
+            level_label(level),
+            super::run_id(),
+            current_trace_suffix()
+        )
     }
+}
+
+fn current_trace_suffix() -> String {
+    super::trace::current_trace()
+        .map(|trace| {
+            format!(
+                " trace_id={} span_id={}",
+                escape_value(&trace.trace_id),
+                escape_value(&trace.span_id)
+            )
+        })
+        .unwrap_or_default()
 }
 
 /// 生成头部记录，用于区分日志格式和运行。
@@ -85,7 +103,10 @@ mod tests {
 
         assert_eq!(
             line,
-            "2026-10-28T03:12:45.123Z WARN  touchai::core::mcp connected"
+            format!(
+                "2026-10-28T03:12:45.123Z WARN  touchai::core::mcp run={} connected",
+                super::super::run_id()
+            )
         );
     }
 
@@ -112,6 +133,28 @@ mod tests {
 
         assert!(!line.contains('\n'));
         assert!(!line.contains('\r'));
+    }
+
+    #[tokio::test]
+    async fn user_sees_the_trace_and_span_on_every_line_inside_a_request() {
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string();
+
+        let line = crate::core::observability::trace::with_traceparent(
+            Some(traceparent),
+            "test.command",
+            async {
+                format_line(
+                    Level::Info,
+                    "touchai::core::mcp",
+                    "connected",
+                    datetime!(2026-10-28 03:12:45.123 UTC),
+                )
+            },
+        )
+        .await;
+
+        assert!(line.contains("trace_id=4bf92f3577b34da6a3ce929d0e0e4736"));
+        assert!(line.contains("span_id="));
     }
 
     #[test]

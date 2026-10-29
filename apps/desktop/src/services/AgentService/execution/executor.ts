@@ -3,7 +3,10 @@
 import { createMcpToolLog, updateMcpToolLogByCallId } from '@database/queries';
 import type { ModelWithProvider } from '@database/queries/models';
 import type { ProviderDriver } from '@database/schema';
-import { log } from '@services/ObservabilityService';
+import type { Span } from '@opentelemetry/api';
+import { error as obsError, event, log } from '@services/ObservabilityService';
+import { ATTR } from '@services/ObservabilityService/attributes';
+import { withSpan } from '@services/ObservabilityService/tracing';
 
 import { tt } from '@/i18n';
 import {
@@ -215,6 +218,7 @@ export type AttemptFailureResult = Extract<AttemptExecutionResult, { type: 'fail
 export interface RunAttemptOptions extends RequestExecutionCallbacks {
     startCheckpoint: AttemptCheckpoint;
     persister: PersistenceProjector;
+    parentSpan?: Span;
 }
 
 function isProviderErrorDetails(value: unknown): value is ProviderErrorDetails {
@@ -1125,6 +1129,7 @@ export class AiRequestExecutor {
         options: {
             step: Extract<AttemptStepResult, { type: 'tool_calls' }>;
             persister: PersistenceProjector;
+            parentSpan?: Span;
         } & RequestExecutionCallbacks
     ): Promise<void> {
         this.emitToolEvent(options.onChunk, {
@@ -1142,15 +1147,24 @@ export class AiRequestExecutor {
 
         const toolResults = await Promise.all(
             options.step.toolCalls.map((toolCall) =>
-                this.executeToolCall(runtime, {
-                    toolCall,
-                    toolCallMessageId,
-                    persister: options.persister,
-                    signal: options.signal,
-                    onChunk: options.onChunk,
-                    requestToolApproval: options.requestToolApproval,
-                    requestUserQuestions: options.requestUserQuestions,
-                })
+                withSpan(
+                    'touchai.tool',
+                    {
+                        [ATTR.toolCallId]: toolCall.id,
+                        [ATTR.toolName]: toolCall.name,
+                    },
+                    () =>
+                        this.executeToolCall(runtime, {
+                            toolCall,
+                            toolCallMessageId,
+                            persister: options.persister,
+                            signal: options.signal,
+                            onChunk: options.onChunk,
+                            requestToolApproval: options.requestToolApproval,
+                            requestUserQuestions: options.requestUserQuestions,
+                        }),
+                    options.parentSpan
+                )
             )
         );
 
@@ -1191,6 +1205,11 @@ export class AiRequestExecutor {
             if (builtInToolId && !isError) {
                 runtime.executedBuiltInTools.add(builtInToolId);
             }
+            event('agent.tool.completed', {
+                [ATTR.toolCallId]: toolCall.id,
+                [ATTR.toolName]: toolCall.name,
+                'tool.success': !isError,
+            });
         }
 
         this.emitToolEvent(options.onChunk, {
@@ -1241,21 +1260,30 @@ export class AiRequestExecutor {
             while (true) {
                 throwIfAborted(options.signal);
 
-                const step = await this.consumeModelStep(runtime, {
-                    signal: options.signal,
-                    onChunk: options.onChunk,
-                    persister: options.persister,
-                    onAttachmentManifestResolved: async (request) => {
-                        try {
-                            await options.persister.syncDeliveryManifestRequest(request);
-                        } catch (error) {
-                            log.error(
-                                '[AiRequestExecutor] Failed to persist attachment delivery manifest request:',
-                                error
-                            );
-                        }
+                const step = await withSpan(
+                    'touchai.model',
+                    {
+                        [ATTR.requestModel]: runtime.activeModel.model_id,
+                        [ATTR.providerName]: runtime.activeModel.provider_name,
                     },
-                });
+                    () =>
+                        this.consumeModelStep(runtime, {
+                            signal: options.signal,
+                            onChunk: options.onChunk,
+                            persister: options.persister,
+                            onAttachmentManifestResolved: async (request) => {
+                                try {
+                                    await options.persister.syncDeliveryManifestRequest(request);
+                                } catch (error) {
+                                    log.error(
+                                        '[AiRequestExecutor] Failed to persist attachment delivery manifest request:',
+                                        error
+                                    );
+                                }
+                            },
+                        }),
+                    options.parentSpan
+                );
 
                 if (step.type === 'done') {
                     break;
@@ -1264,6 +1292,7 @@ export class AiRequestExecutor {
                 await this.runToolRound(runtime, {
                     step,
                     persister: options.persister,
+                    parentSpan: options.parentSpan,
                     signal: options.signal,
                     onChunk: options.onChunk,
                     requestToolApproval: options.requestToolApproval,
@@ -1305,14 +1334,7 @@ export class AiRequestExecutor {
         } catch (error) {
             // AI SDK RetryError 包装了真正的错误——解包后传递给分类器
             const unwrapped = unwrapRetryError(error);
-            log.warn('[AiRequestExecutor] Request failed:', describeErrorForLog(unwrapped));
             const providerErrorDetails = extractProviderErrorDetails(unwrapped);
-            if (providerErrorDetails) {
-                log.warn(
-                    '[AiRequestExecutor] Provider error details:',
-                    summarizeProviderErrorDetails(providerErrorDetails)
-                );
-            }
 
             // 先让 provider 自己分类，再 fallback 到通用启发式。
             // 分类器只负责提升错误信息，不能覆盖真正的请求失败原因。
@@ -1326,6 +1348,27 @@ export class AiRequestExecutor {
                     classificationError
                 );
                 classifiedError = AiError.fromError(unwrapped);
+            }
+
+            // 事件带的是分类后的 code，否则 429 之类只带状态码的失败会记成 unknown。
+            obsError(
+                'agent.request.failed',
+                classifiedError,
+                {
+                    [ATTR.providerName]: runtime.activeModel.provider_name,
+                    [ATTR.requestModel]: runtime.activeModel.model_id,
+                    ...(providerErrorDetails?.statusCode !== undefined
+                        ? { [ATTR.httpStatus]: providerErrorDetails.statusCode }
+                        : {}),
+                },
+                'Agent request failed'
+            );
+            log.warn('[AiRequestExecutor] Request failed:', describeErrorForLog(unwrapped));
+            if (providerErrorDetails) {
+                log.warn(
+                    '[AiRequestExecutor] Provider error details:',
+                    summarizeProviderErrorDetails(providerErrorDetails)
+                );
             }
 
             return {

@@ -1,6 +1,7 @@
 // Copyright (c) 2026. Qian Cheng. Licensed under GPL v3
 
 import {
+    event,
     flushObservability,
     initObservability,
     log,
@@ -20,6 +21,15 @@ function sentEntries() {
     );
 }
 
+function sentEvent(event: string) {
+    return sentEntries().find((entry) => entry.event === event);
+}
+
+function lastEntry() {
+    const entries = sentEntries();
+    return entries[entries.length - 1];
+}
+
 describe('user gets service logs as structured events', () => {
     it('user sees a trailing object kept as structured fields', async () => {
         initObservability();
@@ -27,7 +37,7 @@ describe('user gets service logs as structured events', () => {
         log.warn('connection failed', { code: 'mcp.connect_failed', retries: 2 });
         await flushObservability();
 
-        const [entry] = sentEntries();
+        const entry = sentEvent('app.log');
         expect(entry).toMatchObject({
             level: 4,
             event: 'app.log',
@@ -42,7 +52,7 @@ describe('user gets service logs as structured events', () => {
         log.error('tool failed', new Error('boom'));
         await flushObservability();
 
-        const [entry] = sentEntries();
+        const entry = sentEvent('app.log');
         expect(entry?.msg).toContain('tool failed');
         expect(entry?.msg).toContain('boom');
     });
@@ -53,7 +63,7 @@ describe('user gets service logs as structured events', () => {
         log.info('GET https://example.test/v1?token=secret-value');
         await flushObservability();
 
-        const [entry] = sentEntries();
+        const entry = sentEvent('app.log');
         expect(entry?.msg).not.toContain('secret-value');
     });
 
@@ -63,7 +73,7 @@ describe('user gets service logs as structured events', () => {
         log.trace();
         await flushObservability();
 
-        const [entry] = sentEntries();
+        const entry = lastEntry();
         expect(entry).toMatchObject({ level: 1, event: 'app.log' });
         expect(entry?.msg).toBeUndefined();
     });
@@ -76,7 +86,19 @@ describe('user gets service logs as structured events', () => {
         log.warn(circular, 'state');
         await flushObservability();
 
-        expect(sentEntries()[0]?.msg).toContain('[object Object]');
+        expect(lastEntry()?.msg).toContain('[object Object]');
+    });
+
+    it('user still gets the result when a typed event does not match its schema', async () => {
+        initObservability();
+
+        expect(() => event('agent.request.failed', {} as never)).not.toThrow();
+        await flushObservability();
+
+        expect(sentEvent('obs.schema.invalid')).toMatchObject({
+            level: 5,
+            attrs: { 'obs.event': 'agent.request.failed' },
+        });
     });
 });
 
@@ -89,7 +111,7 @@ describe('user gets third-party console failures as structured events', () => {
         await flushObservability();
 
         expect(nativeWarn).toHaveBeenCalledWith('third-party warning');
-        expect(sentEntries()[0]).toMatchObject({
+        expect(sentEvent('external.console')).toMatchObject({
             level: 4,
             event: 'external.console',
             attrs: {
@@ -108,7 +130,7 @@ describe('user gets third-party console failures as structured events', () => {
         await flushObservability();
 
         expect(debug).toHaveBeenCalledWith('third-party debug');
-        expect(sentEntries()).toEqual([]);
+        expect(sentEvent('external.console')).toBeUndefined();
     });
 
     it('user gets a third-party value that cannot be serialised kept as text', async () => {
@@ -120,7 +142,7 @@ describe('user gets third-party console failures as structured events', () => {
         console.warn(circular, undefined);
         await flushObservability();
 
-        const [entry] = sentEntries();
+        const entry = lastEntry();
         expect(entry?.msg).toContain('[object Object]');
         expect(entry?.msg).toContain('undefined');
     });
@@ -134,7 +156,7 @@ describe('user gets third-party console failures as structured events', () => {
         console.error(error);
         await flushObservability();
 
-        expect(sentEntries()[0]?.msg).toContain('Error: connection dropped');
+        expect(lastEntry()?.msg).toContain('Error: connection dropped');
     });
 });
 

@@ -1,13 +1,22 @@
 import { native } from '@services/NativeService';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
+import { ATTR } from './attributes';
 import {
     installConsoleInterceptor,
     reportLoggingFailure,
     restoreConsoleInterceptor,
 } from './console';
+import { errorAttributes } from './errors';
+import {
+    OBSERVABILITY_EVENTS,
+    type ObservabilityEventAttributes,
+    type ObservabilityEventName,
+    validateEventAttributes,
+} from './events';
 import { LogQueue } from './queue';
 import { redactAttributes, redactText } from './redact';
+import { activeSpanContext, initTracing, resetTracingForTests } from './tracing';
 import {
     LOG_LEVEL_NUMBERS,
     type LogAttributeValue,
@@ -38,6 +47,7 @@ function resolveWindowLabel(): string | null {
 export function initObservability(): void {
     if (initialized) return;
     initialized = true;
+    initTracing();
     resolveWindowLabel();
 
     queue = new LogQueue({
@@ -47,6 +57,7 @@ export function initObservability(): void {
     });
     queue.start();
     installConsoleInterceptor(emit);
+    event('app.start', { [ATTR.window]: resolveWindowLabel() ?? 'unknown' });
 
     if (!visibilityListenerInstalled && typeof document !== 'undefined') {
         visibilityListenerInstalled = true;
@@ -104,14 +115,56 @@ export function emit(
 ): void {
     if (!queue) return;
 
+    const spanContext = activeSpanContext();
     const envelope: LogEnvelope = {
         level: LOG_LEVEL_NUMBERS[level],
         event,
         window: resolveWindowLabel() ?? undefined,
+        traceId: spanContext?.traceId,
+        spanId: spanContext?.spanId,
         msg: msg ? redactText(msg) : undefined,
         attrs: redactAttributes(attrs),
     };
     queue.push(envelope);
+}
+
+/** Emit a typed critical event; schemas are checked in development and tests. */
+export function event<T extends ObservabilityEventName>(
+    name: T,
+    attrs: ObservabilityEventAttributes<T>,
+    msg?: string
+): void {
+    if (!isValidEvent(name, attrs)) return;
+    const definition = OBSERVABILITY_EVENTS[name];
+    emit(definition.level, name, attrs, msg);
+}
+
+export function error(
+    name: ObservabilityEventName,
+    cause: unknown,
+    attrs: Record<string, string | number | boolean> = {},
+    msg?: string
+): void {
+    const enriched = { ...attrs, ...errorAttributes(cause) };
+    if (!isValidEvent(name, enriched)) return;
+    emit(OBSERVABILITY_EVENTS[name].level, name, enriched, msg);
+}
+
+/**
+ * Logging must never break the caller. A schema mismatch drops the typed event,
+ * records a content-free marker, and leaves the business path untouched.
+ */
+function isValidEvent(
+    name: ObservabilityEventName,
+    attrs: Record<string, string | number | boolean>
+): boolean {
+    try {
+        validateEventAttributes(name, attrs);
+        return true;
+    } catch {
+        emit('error', 'obs.schema.invalid', { 'obs.event': name });
+        return false;
+    }
 }
 
 export async function flushObservability(): Promise<void> {
@@ -189,4 +242,5 @@ export function resetObservabilityForTests(): void {
     visibilityListenerInstalled = false;
     shutdownFlushInstalled = false;
     restoreConsoleInterceptor();
+    resetTracingForTests();
 }
