@@ -287,6 +287,72 @@ fn redact_header(value: &str) -> String {
     }
 }
 
+/// 常见的独立令牌前缀；命中即整段脱敏，即使没有字段名。
+fn is_common_secret_token(token: &str) -> bool {
+    let trimmed = token.trim_matches(|character: char| {
+        matches!(character, '"' | '\'' | ',' | ';' | ')' | '(' | ']' | '[')
+    });
+
+    looks_like_secret_value(trimmed)
+}
+/// Redact credentials from captured MCP stderr before it reaches disk or a bundle.
+pub(crate) fn redact_stderr(raw: &str) -> String {
+    raw.split('\n')
+        .map(redact_stderr_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 单行脱敏。凭据类请求头之后的内容整行丢弃，避免 `Basic`/`Digest` 的值残留。
+fn redact_stderr_line(line: &str) -> String {
+    let mut output = Vec::new();
+    let mut tokens = line.split_whitespace().peekable();
+
+    while let Some(token) = tokens.next() {
+        let core = token.trim_matches(|character: char| {
+            matches!(
+                character,
+                '"' | '\'' | '(' | '[' | '{' | '<' | ')' | ']' | '}' | '>' | ',' | ';'
+            )
+        });
+        if is_url_like(core) {
+            output.push(redact_url(core));
+            continue;
+        }
+
+        if let Some((name, value)) = core.split_once('=') {
+            if is_secret_name(name) || looks_like_secret_value(value) {
+                output.push(format!("{name}={REDACTED}"));
+                continue;
+            }
+            if is_url_like(value) {
+                output.push(format!("{name}={}", redact_url(value)));
+                continue;
+            }
+        }
+
+        // 任何 Name: 之后的内容整行丢弃：未知头也可能带会话凭据。
+        if token.ends_with(':') {
+            output.push(format!("{token} {REDACTED}"));
+            break;
+        }
+
+        if token.eq_ignore_ascii_case("bearer") {
+            output.push(token.to_string());
+            if tokens.next().is_some() {
+                output.push(REDACTED.to_string());
+            }
+            continue;
+        }
+        if is_common_secret_token(token) {
+            output.push(REDACTED.to_string());
+            continue;
+        }
+
+        output.push(token.to_string());
+    }
+    output.join(" ")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +447,75 @@ mod tests {
                 "--env=FOO=opaque-value"
             ]
         );
+    }
+
+    #[test]
+    fn user_does_not_see_mcp_stderr_secrets_in_a_diagnostic_bundle() {
+        let redacted = redact_stderr(
+            "startup failed token=secret-value\n\
+             Authorization: Bearer secret-header\n\
+             GET https://user:pass@mcp.example.test/sse?api_key=secret-query",
+        );
+
+        assert!(!redacted.contains("secret-value"));
+        assert!(!redacted.contains("secret-header"));
+        assert!(!redacted.contains("secret-query"));
+        assert!(redacted.contains("mcp.example.test"));
+        assert!(!redacted.contains("/sse"));
+    }
+
+    #[test]
+    fn user_does_not_see_basic_or_digest_credentials_in_mcp_stderr() {
+        let redacted = redact_stderr(
+            "Authorization: Basic dXNlcjpwYXNz\nerror 401 Proxy-Authorization: Digest username=\"u\"",
+        );
+
+        assert!(!redacted.contains("dXNlcjpwYXNz"));
+        assert!(!redacted.contains("username="));
+        assert!(redacted.contains("Authorization: [redacted]"));
+        assert!(redacted.contains("Proxy-Authorization: [redacted]"));
+    }
+
+    #[test]
+    fn user_does_not_see_standalone_tokens_in_mcp_stderr() {
+        let redacted = redact_stderr(
+            "request failed with sk-live-1234567890 and ghp_abcdefghijklmnop, retrying",
+        );
+
+        assert!(!redacted.contains("sk-live-1234567890"));
+        assert!(!redacted.contains("ghp_abcdefghijklmnop"));
+        assert!(redacted.contains("retrying"));
+    }
+
+    #[test]
+    fn user_does_not_see_json_credentials_in_mcp_stderr() {
+        let redacted = redact_stderr(r#"{"authorization": "Bearer json-secret-value"}"#);
+
+        assert!(!redacted.contains("json-secret-value"));
+        assert!(redacted.contains("[redacted]"));
+    }
+
+    #[test]
+    fn user_does_not_see_credentials_in_a_non_http_stderr_url() {
+        let redacted =
+            redact_stderr("connect postgres://user:pass@db.example.test:5432/app?sslkey=secret");
+
+        assert_eq!(
+            redacted,
+            "connect postgres://db.example.test:5432/[redacted-path]"
+        );
+        assert!(!redacted.contains("pass"));
+        assert!(!redacted.contains("secret"));
+    }
+
+    #[test]
+    fn user_does_not_see_url_credentials_after_a_harmless_key() {
+        let redacted =
+            redact_stderr("\"dsn=postgres://user:pass@db.example.test/app?token=secret\"");
+
+        assert_eq!(redacted, "dsn=postgres://db.example.test/[redacted-path]");
+        assert!(!redacted.contains("pass"));
+        assert!(!redacted.contains("secret"));
     }
 
     #[test]

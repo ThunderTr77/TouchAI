@@ -5,15 +5,46 @@
 //! 命令包装放在这里，`tauri::command` 生成的名字才能被 `generate_handler!` 找到。
 
 use crate::core::observability::ingest::{ingest_batch, run_id_string, LogEnvelope};
+use crate::core::observability::{
+    bundle::{self, BundlePreview},
+    level::{self, DiagnosticModeStatus},
+};
 
-/// 接收前端批量日志。
+/// 接收前端批量日志。写盘是阻塞操作，放到阻塞线程池，避免卡住主线程事件循环。
 #[tauri::command]
-pub fn obs_ingest(batch: Vec<LogEnvelope>) -> Result<(), String> {
-    ingest_batch(batch)
+pub async fn obs_ingest(batch: Vec<LogEnvelope>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || ingest_batch(batch))
+        .await
+        .map_err(|error| format!("log ingest task failed: {error}"))?
 }
 
 /// 返回本次运行的标识。
 #[tauri::command]
 pub fn obs_run_id() -> String {
     run_id_string()
+}
+
+#[tauri::command]
+pub fn obs_set_diagnostic_mode(enabled: bool) -> DiagnosticModeStatus {
+    level::set_diagnostic_mode(enabled)
+}
+
+#[tauri::command]
+pub fn obs_diagnostic_mode_status() -> DiagnosticModeStatus {
+    level::status()
+}
+
+#[tauri::command]
+pub async fn obs_preview_bundle() -> Result<BundlePreview, String> {
+    bundle::preview().await
+}
+
+#[tauri::command]
+pub async fn obs_export_bundle(destination: String) -> Result<BundlePreview, String> {
+    bundle::export(&destination).await
+}
+
+#[tauri::command]
+pub fn obs_dismiss_crashes() -> Result<usize, String> {
+    bundle::dismiss_crashes()
 }
