@@ -67,6 +67,37 @@ describe('user gets service logs as structured events', () => {
         expect(entry?.msg).not.toContain('secret-value');
     });
 
+    it('user does not get a provider error body written to the log when the message spans lines', async () => {
+        initObservability();
+
+        log.error(
+            'request failed',
+            new Error('400 Bad Request\n{"prompt":"private conversation text"}')
+        );
+        await flushObservability();
+
+        const entry = sentEvent('app.log');
+        expect(entry?.msg).toContain('400 Bad Request');
+        expect(entry?.msg).not.toContain('private conversation text');
+    });
+
+    it('user gets the call frames when a webkit stack carries no message line', async () => {
+        initObservability();
+        const error = new Error('boom');
+        // WebKit 的 stack 只有 `fn@url:line:col`，没有 `name: message` 首行。
+        error.stack = 'runAttempt@tauri://localhost/assets/main.js:10:20\nrunTurn@main.js:30:4';
+
+        log.error('request failed', error);
+        await flushObservability();
+
+        const entry = sentEvent('app.log');
+        const message = String(entry?.msg ?? '');
+        // 帧里的 URL 会被脱敏，函数名和行号保留，帧本身不能丢。
+        expect(message).toContain('runAttempt@');
+        expect(message).toContain('boom');
+        expect(message.split('\n').length).toBeGreaterThan(1);
+    });
+
     it('user gets an event with no message when nothing was logged', async () => {
         initObservability();
 
