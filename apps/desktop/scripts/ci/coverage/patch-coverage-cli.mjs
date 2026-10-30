@@ -176,7 +176,7 @@ export function resolveBase(ref) {
  */
 export function readDiff(base, path) {
     const run = (ref) =>
-        execFileSync('git', ['diff', '--unified=0', '--no-color', ref, '--', path], {
+        execFileSync('git', ['diff', '--unified=0', '--no-color', ref, '--', `:(top)${path}`], {
             encoding: 'utf8',
             maxBuffer: 32 * 1024 * 1024,
         });
@@ -220,6 +220,10 @@ export function runPatchCoverage(options, { readDiff: diff = readDiff, resolveBa
 
 function main() {
     const options = parseArgs(process.argv.slice(2));
+    const repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+        encoding: 'utf8',
+    }).trim();
+    options.root = resolve(repoRoot, options.root);
     const { result, markdown, failures } = runPatchCoverage(options);
 
     process.stdout.write(`${markdown}\n`);

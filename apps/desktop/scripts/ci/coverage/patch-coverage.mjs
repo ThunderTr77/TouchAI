@@ -1,5 +1,7 @@
 // Copyright (c) 2026. 千诚. Licensed under GPL v3
 
+import { posix, win32 } from 'node:path';
+
 /**
  * Patch coverage: the share of the lines this change touched that the suite exercises.
  *
@@ -112,38 +114,38 @@ export function measurePatchCoverage(changedLines, coverageReport, options = {})
 
     // The report keys are absolute paths; the diff keys are repo-relative. Index the report by
     // its repo-relative suffix so the two can be matched regardless of where the checkout lives.
-    // With `root: '.'` the keys are already relative, so no prefix is stripped.
-    const trimmedRoot = normalise(repoRoot).replace(/^\.\//, '').replace(/^\.$/, '').replace(/\/$/, '');
-    const prefix = trimmedRoot ? `/${trimmedRoot}/` : null;
+    const configuredRoot = normalise(repoRoot).replace(/^\.\//, '');
+    const root = !configuredRoot || configuredRoot === '.' ? normalise(process.cwd()) : configuredRoot;
+    const absoluteRoot = posix.isAbsolute(root) || win32.isAbsolute(root);
+    const explicitAbsoluteRoot = posix.isAbsolute(configuredRoot) || win32.isAbsolute(configuredRoot);
+    const prefix = `${absoluteRoot ? '' : '/'}${root.replace(/\/+$/, '')}/`;
     const byRelativePath = new Map();
     const normalisedEntries = [];
     for (const [absolute, fileCoverage] of Object.entries(coverageReport)) {
         const normalisedAbsolute = normalise(absolute);
-        const index = prefix ? normalisedAbsolute.lastIndexOf(prefix) : -1;
+        const index = absoluteRoot
+            ? normalisedAbsolute.startsWith(prefix)
+                ? 0
+                : -1
+            : normalisedAbsolute.lastIndexOf(prefix);
         const relative =
             index >= 0 ? normalisedAbsolute.slice(index + prefix.length) : normalisedAbsolute;
         byRelativePath.set(relative, fileCoverage);
         normalisedEntries.push([normalisedAbsolute, fileCoverage]);
     }
 
-    /**
-     * Finds a changed file's entry in the report.
-     *
-     * `repoRoot` alone cannot bridge the two shapes. The diff keys are repository-relative
-     * (`apps/desktop/src/x.ts`) while the report keys are absolute, so the only prefix that
-     * strips exactly is the absolute checkout path — which differs per machine and per
-     * runner. Passing anything else (`apps/desktop`, or `.`) leaves the two sides keyed
-     * differently, every lookup misses, and every changed line is counted as uncovered.
-     *
-     * Matching the absolute key's tail removes that dependency on the caller: a key ending
-     * in `/<changed path>` is the same file whatever directory the checkout sits in.
-     */
+    // Relative roots allow portable reports; an explicit absolute root must not
+    // fall back to a different checkout with the same source-file suffix.
     const findCoverage = (path) => {
         const relative = normalise(path);
         const indexed = byRelativePath.get(relative);
 
         if (indexed) {
             return indexed;
+        }
+
+        if (explicitAbsoluteRoot) {
+            return undefined;
         }
 
         const suffix = `/${relative}`;
