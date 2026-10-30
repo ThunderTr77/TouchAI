@@ -3,6 +3,11 @@
 import { updateModelLastUsed } from '@database/queries';
 import { findModelPricing } from '@database/queries/llmMetadata';
 import type { SessionTurnEntity } from '@database/types';
+import { SpanStatusCode } from '@opentelemetry/api';
+import { event, log } from '@services/ObservabilityService';
+import { ATTR } from '@services/ObservabilityService/attributes';
+import { classifyError } from '@services/ObservabilityService/errors';
+import { withSpan } from '@services/ObservabilityService/tracing';
 
 import { t } from '@/i18n';
 import {
@@ -37,6 +42,20 @@ import {
     shouldRetryRequestFailure,
     waitForRetryDelay,
 } from './retry';
+
+/** 取消是用户主动操作，不应把 attempt span 标记为错误。 */
+export function attemptSpanStatus(
+    attemptResult: AttemptExecutionResult
+): { code: SpanStatusCode; message: string } | undefined {
+    if (attemptResult.type !== 'failed' || attemptResult.error.is(AiErrorCode.REQUEST_CANCELLED)) {
+        return undefined;
+    }
+
+    return {
+        code: SpanStatusCode.ERROR,
+        message: attemptResult.error.code,
+    };
+}
 
 /**
  * Host environment the runtime needs before it can run a turn.
@@ -194,7 +213,7 @@ export class AiConversationRuntime {
         try {
             await this.options.environment?.reportPersistenceIssue?.(issue);
         } catch (error) {
-            console.error('[AiConversationRuntime] Failed to deliver persistence issue:', error);
+            log.error('[AiConversationRuntime] Failed to deliver persistence issue:', error);
         }
     }
 
@@ -213,7 +232,7 @@ export class AiConversationRuntime {
                 continue;
             }
 
-            console.error(
+            log.error(
                 '[AiConversationRuntime] Failed to pre-persist attachment before request:',
                 result.reason
             );
@@ -311,7 +330,7 @@ export class AiConversationRuntime {
                 });
             })
             .catch(async (error) => {
-                console.error('[AiConversationRuntime] Failed to record request start:', error);
+                log.error('[AiConversationRuntime] Failed to record request start:', error);
                 await this.reportPersistenceIssue({
                     phase: 'turn_start',
                     ...buildPersistenceIssue('agent.persistenceIssue.turnStart'),
@@ -350,7 +369,7 @@ export class AiConversationRuntime {
                 estimatedOutputCostPerMillion: pricing ? Number(pricing.outputPerMillion) : null,
             });
         } catch (error) {
-            console.warn('[AiConversationRuntime] Failed to prepare live usage tracker:', error);
+            log.warn('[AiConversationRuntime] Failed to prepare live usage tracker:', error);
             return null;
         }
     }
@@ -412,7 +431,7 @@ export class AiConversationRuntime {
                     result.totalUsage.cacheWriteTokens,
             });
         } catch (persistError) {
-            console.error('[AiConversationRuntime] Failed to persist completion:', persistError);
+            log.error('[AiConversationRuntime] Failed to persist completion:', persistError);
             await this.reportPersistenceIssue({
                 phase: 'turn_completed',
                 ...buildPersistenceIssue('agent.persistenceIssue.turnCompleted'),
@@ -430,7 +449,7 @@ export class AiConversationRuntime {
         this.requestFinalized = true;
 
         await updateModelLastUsed({ id: result.model.id }).catch((error) => {
-            console.error('[AiConversationRuntime] Failed to update model last used:', error);
+            log.error('[AiConversationRuntime] Failed to update model last used:', error);
         });
 
         if (this.options.taskId) {
@@ -456,6 +475,22 @@ export class AiConversationRuntime {
      * Run the full request lifecycle.
      */
     async run(): Promise<ExecuteRequestResult> {
+        const attributes: Record<string, string | number> = {
+            [ATTR.requestModel]: this.options.modelId ?? 'unknown',
+        };
+        if (this.options.sessionId !== undefined) {
+            attributes[ATTR.conversationId] = this.options.sessionId;
+        }
+        if (this.options.taskId) {
+            attributes[ATTR.turnId] = this.options.taskId;
+        }
+
+        return withSpan('touchai.turn', attributes, (turnSpan) => this.runInSpan(turnSpan));
+    }
+
+    private async runInSpan(
+        turnSpan: import('@opentelemetry/api').Span
+    ): Promise<ExecuteRequestResult> {
         const context = await this.createRuntimeContext();
         let resumeCheckpoint = context.initialCheckpoint;
 
@@ -471,19 +506,27 @@ export class AiConversationRuntime {
             this.liveTracker?.start();
 
             for (let retryAttempt = 0; retryAttempt <= MAX_REQUEST_RETRIES; retryAttempt += 1) {
-                const attemptResult = await this.executor.runAttempt({
-                    startCheckpoint: resumeCheckpoint,
-                    persister: context.persister,
-                    taskId: this.options.taskId,
-                    signal: this.options.signal,
-                    onChunk: (chunk) => {
-                        this.liveTracker?.consume(chunk);
-                        this.options.onChunk?.(chunk);
-                    },
-                    onTurnEvent: this.options.onTurnEvent,
-                    requestToolApproval: this.options.requestToolApproval,
-                    requestUserQuestions: this.options.requestUserQuestions,
-                });
+                const attemptResult = await withSpan(
+                    'touchai.attempt',
+                    { [ATTR.attempt]: retryAttempt + 1 },
+                    (attemptSpan) =>
+                        this.executor.runAttempt({
+                            startCheckpoint: resumeCheckpoint,
+                            persister: context.persister,
+                            taskId: this.options.taskId,
+                            signal: this.options.signal,
+                            parentSpan: attemptSpan,
+                            onChunk: (chunk) => {
+                                this.liveTracker?.consume(chunk);
+                                this.options.onChunk?.(chunk);
+                            },
+                            onTurnEvent: this.options.onTurnEvent,
+                            requestToolApproval: this.options.requestToolApproval,
+                            requestUserQuestions: this.options.requestUserQuestions,
+                        }),
+                    turnSpan,
+                    attemptSpanStatus
+                );
 
                 await context.requestStartRecordPromise;
 
@@ -503,7 +546,7 @@ export class AiConversationRuntime {
                             errorCode: attemptResult.error.code,
                         });
                     } catch (persistError) {
-                        console.error(
+                        log.error(
                             '[AiConversationRuntime] Failed to persist cancellation:',
                             persistError
                         );
@@ -545,7 +588,7 @@ export class AiConversationRuntime {
                             }
                         );
                     } catch (persistError) {
-                        console.error(
+                        log.error(
                             '[AiConversationRuntime] Failed to persist retry attempt:',
                             persistError
                         );
@@ -571,6 +614,10 @@ export class AiConversationRuntime {
                         resumeCheckpoint,
                         attemptResult
                     );
+                    event('agent.retry.scheduled', {
+                        [ATTR.attempt]: nextAttempt,
+                        [ATTR.errorCode]: classifyError(attemptResult.error),
+                    });
                     await waitForRetryDelay(getRetryDelayMs(nextAttempt), this.options.signal);
                     continue;
                 }
@@ -591,10 +638,7 @@ export class AiConversationRuntime {
                         }
                     );
                 } catch (persistError) {
-                    console.error(
-                        '[AiConversationRuntime] Failed to persist failure:',
-                        persistError
-                    );
+                    log.error('[AiConversationRuntime] Failed to persist failure:', persistError);
                     await this.reportPersistenceIssue({
                         phase: 'turn_failed',
                         ...buildPersistenceIssue('agent.persistenceIssue.turnFailed'),
@@ -626,7 +670,7 @@ export class AiConversationRuntime {
                     try {
                         await context.persister.markCancelled();
                     } catch (persistError) {
-                        console.error(
+                        log.error(
                             '[AiConversationRuntime] Failed to persist cancellation:',
                             persistError
                         );
@@ -647,7 +691,7 @@ export class AiConversationRuntime {
                     try {
                         await context.persister.markFailed(aiError.message);
                     } catch (persistError) {
-                        console.error(
+                        log.error(
                             '[AiConversationRuntime] Failed to persist failure:',
                             persistError
                         );

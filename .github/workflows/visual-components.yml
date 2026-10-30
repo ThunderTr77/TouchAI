@@ -1,0 +1,276 @@
+name: Component Visual Tests
+
+on:
+    # `workflow_dispatch` also makes this runnable by hand before it reaches `main`:
+    # GitHub only triggers `pull_request` workflows from the base branch's copy of
+    # the file, so a brand-new workflow cannot prove itself on its own PR otherwise.
+    # It is also how baselines are regenerated in the cloud:
+    #   gh workflow run visual-components.yml --ref <branch> -f update_visual_baselines=true
+    workflow_dispatch:
+        inputs:
+            update_visual_baselines:
+                description: Regenerate the component baselines and upload them as an artifact instead of comparing.
+                type: boolean
+                default: false
+    pull_request:
+    merge_group:
+        types:
+            - checks_requested
+    push:
+        branches:
+            - main
+
+permissions:
+    # Uploading the diff images as release assets needs to write contents. A pull
+    # request from a fork receives a read-only token regardless of this, which the
+    # publish step detects and handles by falling back to the artifact link.
+    contents: write
+    # The report is posted as a pull request comment, so the reviewer sees which
+    # snapshot moved without opening the Actions tab. Comments on a pull request go
+    # through the issues API but are authorised by this permission, not `issues:`.
+    pull-requests: write
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    changes:
+        name: Classify PR changes
+        runs-on: ubuntu-latest
+        outputs:
+            ui_changed: ${{ steps.classify.outputs.ui_changed }}
+        steps:
+            - id: classify
+              name: Detect component or style changes
+              uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+              with:
+                  script: |
+                      // Stories and their baselines only move when components, styles or
+                      // the visual harness change. Running the whole Windows E2E suite for
+                      // a docs edit is what made people stop reading the check list.
+                      const uiPatterns = [
+                        /^apps\/desktop\/src\/components\//,
+                        /^apps\/desktop\/src\/styles\//,
+                        /^apps\/desktop\/src\/views\//,
+                        /^apps\/desktop\/tests\/visual\//,
+                        /^apps\/desktop\/\.storybook\//,
+                        /^apps\/desktop\/playwright\.config\.ts$/,
+                        /^apps\/desktop\/package\.json$/,
+                        /^pnpm-lock\.yaml$/,
+                        /^\.github\/workflows\/visual-components\.yml$/,
+                      ];
+
+                      const pullNumber = context.payload.pull_request?.number;
+                      if (!pullNumber) {
+                        // A manual run has no PR to classify; run everything, which is
+                        // what someone dispatching it by hand wants anyway.
+                        core.setOutput('ui_changed', 'true');
+                        return;
+                      }
+
+                      const files = await github.paginate(github.rest.pulls.listFiles, {
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        pull_number: pullNumber,
+                        per_page: 100,
+                      });
+
+                      const changed = files.some((file) => uiPatterns.some((pattern) => pattern.test(file.filename)));
+                      core.setOutput('ui_changed', changed ? 'true' : 'false');
+
+    component-visual:
+        name: Component Visual Tests
+        needs: changes
+        if: needs.changes.outputs.ui_changed == 'true' || inputs.update_visual_baselines
+        runs-on: ubuntu-latest
+        # The renderer is the baseline. Playwright renders with whatever Chromium,
+        # fonts and system libraries it finds, so comparing pixels captured in one
+        # environment against another is meaningless. This image ships both, pinned,
+        # which is what makes the committed PNGs reproducible — and it is why the
+        # baselines are generated here rather than on a developer machine.
+        #
+        # Pinned to the exact `@playwright/test` version in the lockfile: if the two
+        # drift, Playwright cannot locate the browser executables at all. The guard
+        # step below turns that into a readable error.
+        container:
+            image: mcr.microsoft.com/playwright:v1.64.1-noble
+        env:
+            PLAYWRIGHT_IMAGE_TAG: v1.64.1-noble
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6
+
+            - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+              with:
+                  node-version: 22
+                  package-manager-cache: false
+
+            - name: Install frontend dependencies
+              run: pnpm install --frozen-lockfile
+
+            # Browsers and their system dependencies are already in the image, so
+            # `playwright install --with-deps` is not needed here. What does need
+            # checking is that the image and the lockfile still agree: a mismatch
+            # fails later with an opaque "executable doesn't exist", which reads like
+            # a broken runner rather than a stale pin.
+            - name: Assert the pinned renderer matches the lockfile
+              # Inside a container the default shell is `sh` (dash), which rejects
+              # `set -o pipefail` and exits 2 before running anything. The scripts in
+              # this job are bash, so ask for bash explicitly.
+              shell: bash
+              # `@playwright/test` is a workspace dependency of `apps/desktop`, and pnpm
+              # does not hoist it to the repository root, so the version has to be read
+              # from the package that actually declares it.
+              working-directory: apps/desktop
+              run: |
+                  set -euo pipefail
+                  image_version="${PLAYWRIGHT_IMAGE_TAG#v}"
+                  image_version="${image_version%%-*}"
+                  project_version="$(node -p "require('@playwright/test/package.json').version")"
+
+                  if [ "$image_version" != "$project_version" ]; then
+                      echo "::error::The renderer image is $PLAYWRIGHT_IMAGE_TAG but @playwright/test is $project_version. Baselines are only comparable when these match: bump the container image and regenerate the baselines in the same change."
+                      exit 1
+                  fi
+
+                  echo "Renderer $PLAYWRIGHT_IMAGE_TAG matches @playwright/test $project_version."
+
+            # The product font is fetched once per run by the E2E font module and
+            # verified against the product sha256; there is nothing to restore
+            # beforehand, and a stale cache would be worse than a download.
+
+            - name: Run component visual tests
+              if: ${{ !inputs.update_visual_baselines }}
+              run: pnpm --filter @touchai/desktop test:visual:components
+
+            # Component baselines are rendered where the gate runs them. Chromium is
+            # pinned by the lockfile and renders at deviceScaleFactor 1, so this layer
+            # is portable in a way the WebView2 one is not — but "portable" still means
+            # "generated on the platform that compares", and that is this runner.
+            - name: Regenerate component baselines
+              if: ${{ inputs.update_visual_baselines }}
+              run: pnpm --filter @touchai/desktop test:visual:components:update
+
+            # The upload reads from a directory rather than the results tree, so the
+            # images are gathered first: the retry directory holds a second copy of the
+            # same files, and the first occurrence of each name is the one kept.
+            - name: Gather the diff images
+              if: ${{ !cancelled() && !inputs.update_visual_baselines }}
+              working-directory: apps/desktop
+              # Inside the container the default shell is `sh` (dash), which rejects
+              # `set -o pipefail` and exits 2 before running anything.
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  images_dir="$RUNNER_TEMP/visual-diffs"
+                  rm -rf "$images_dir"
+                  mkdir -p "$images_dir"
+
+                  find test-results -type f \( -name '*-expected.png' -o -name '*-actual.png' -o -name '*-diff.png' \) -print0 > "$RUNNER_TEMP/image-list"
+
+                  collected=0
+                  while IFS= read -r -d '' image; do
+                      name="$(basename "$image")"
+                      if [ ! -e "$images_dir/$name" ]; then
+                          cp "$image" "$images_dir/$name"
+                          collected=$((collected + 1))
+                      fi
+                  done < "$RUNNER_TEMP/image-list"
+
+                  echo "collected ${collected} image(s)."
+
+            # A failing comparison leaves the expected, actual and diff images on the
+            # runner, which is destroyed when the job ends. The images have to reach the
+            # reviewer, and an artifact does not: it needs authentication, so a markdown
+            # image pointing at it renders nothing. GitHub's own attachment store is the
+            # one place that serves an image publicly from this repository, and
+            # `publish-evidence.mjs` posts to the same endpoint the web UI uses when a
+            # file is pasted into a comment.
+            #
+            # The upload needs a user token: the endpoint answers 404 for installation
+            # tokens and for `GITHUB_TOKEN`, because an attachment has an author and a bot
+            # has none. `UI_PREVIEW_TOKEN` is the credential the UI preview workflow
+            # already uses for exactly this. When it is absent — a fork pull request, or a
+            # repository that has not configured it — the script records nothing and the
+            # report links the artifact instead. That is a worse report, not a failed run.
+            - name: Publish the diff images
+              id: publish
+              if: ${{ !cancelled() && !inputs.update_visual_baselines }}
+              working-directory: apps/desktop
+              env:
+                  UI_PREVIEW_TOKEN: ${{ secrets.UI_PREVIEW_TOKEN }}
+                  UI_PREVIEW_REPOSITORY_ID: ${{ github.event.repository.id }}
+                  VISUAL_EVIDENCE_URLS: ${{ runner.temp }}/visual-evidence.json
+              run: node ./scripts/ci/publish-evidence.mjs "$RUNNER_TEMP/visual-diffs" "$VISUAL_EVIDENCE_URLS"
+
+            # A failing comparison leaves the expected, actual and diff images on the
+            # runner, which is destroyed when the job ends. This turns them into a
+            # report: which snapshot moved, the images themselves, and how to refresh
+            # the baselines. Without it a failure says only "some pixels differ", which
+            # is the kind of check people learn to ignore.
+            - name: Summarise the visual differences
+              if: ${{ !cancelled() && !inputs.update_visual_baselines }}
+              working-directory: apps/desktop
+              env:
+                  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                  VISUAL_SUMMARY_OUTPUT: ${{ runner.temp }}/visual-summary.md
+                  VISUAL_EVIDENCE_URLS: ${{ runner.temp }}/visual-evidence.json
+              run: node ./scripts/ci/visual-report.mjs --layer components --report test-results/results.json
+
+            # The report is posted by the App rather than by `github-actions`, so the
+            # comment is attributable and so a fork pull request can still receive it: the
+            # App token is minted by this workflow, not derived from the pull request's
+            # (read-only) `GITHUB_TOKEN`. The `if:` still limits the run to branches in
+            # this repository, because the App token can write anywhere it is installed
+            # and there is no reason to hand it to code from a fork.
+            - name: Mint an App token
+              id: app
+              if: |
+                  !cancelled() &&
+                  !inputs.update_visual_baselines &&
+                  github.event_name == 'pull_request' &&
+                  github.event.pull_request.head.repo.full_name == github.repository
+              uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+              with:
+                  app-id: ${{ secrets.BOT_APP_ID }}
+                  private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+                  owner: ${{ github.repository_owner }}
+                  repositories: ${{ github.event.repository.name }}
+                  permission-pull-requests: write
+                  permission-issues: write
+
+            # One comment holds both visual layers, so it is upserted rather than posted:
+            # the script rewrites only this layer's block and leaves the app layer's
+            # report, written by the other workflow, untouched. The App token goes in
+            # `GH_TOKEN` because the comment has to be written by the bot and not by
+            # `github-actions`, and because the attachment URLs it embeds are only
+            # readable from a comment an author posted.
+            - name: Post the report on the pull request
+              if: steps.app.outputs.token != ''
+              working-directory: apps/desktop
+              env:
+                  GH_TOKEN: ${{ steps.app.outputs.token }}
+                  GITHUB_REPOSITORY: ${{ github.repository }}
+                  PR_NUMBER: ${{ github.event.pull_request.number }}
+                  LAYER: components
+                  SECTION_PATH: ${{ runner.temp }}/visual-summary.md
+              run: node ./scripts/ci/visual-comment.mjs
+
+            - name: Upload component baselines
+              if: ${{ inputs.update_visual_baselines }}
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: component-baselines
+                  path: apps/desktop/tests/visual/__snapshots__/
+                  if-no-files-found: error
+
+            - name: Upload diff artifacts
+              if: failure()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: component-visual-diffs
+                  path: |
+                      apps/desktop/test-results/
+                  if-no-files-found: ignore

@@ -11,6 +11,8 @@ import {
 } from '@database/queries';
 import type { ModelWithProvider } from '@database/queries/models';
 import type { ToolLogKind } from '@database/schema';
+import { log } from '@services/ObservabilityService';
+import { serializeAuditPayload } from '@services/ObservabilityService/redact';
 
 import { tt } from '@/i18n';
 import { AiError, AiErrorCode } from '@/services/AgentService/contracts/errors';
@@ -105,10 +107,7 @@ async function markCancelledToolLog(options: {
             duration_ms: Date.now() - options.callStartTime,
             error_message: tt('请求已取消'),
         }).catch((error) => {
-            console.error(
-                '[BuiltInToolService] Failed to update cancelled built-in tool log:',
-                error
-            );
+            log.error('[BuiltInToolService] Failed to update cancelled built-in tool log:', error);
         });
     }
 }
@@ -199,7 +198,7 @@ class BuiltInToolService {
                     });
                 }
             } catch (error) {
-                console.error(
+                log.error(
                     `[BuiltInToolService] Failed to build tool definition: ${tool.tool_id}`,
                     error
                 );
@@ -274,7 +273,7 @@ class BuiltInToolService {
                 context
             );
         } catch (error) {
-            console.warn(
+            log.warn(
                 `[BuiltInToolService] Failed to build runtime conversation semantic: ${resolved.namespacedName}`,
                 error
             );
@@ -370,7 +369,7 @@ class BuiltInToolService {
                 session_id: options.sessionId,
                 message_id: options.toolCallMessageId,
                 iteration: options.iteration,
-                input: JSON.stringify(options.toolArgs),
+                input: serializeAuditPayload(options.toolArgs),
                 status: 'pending',
                 approval_state: 'none',
             });
@@ -383,7 +382,7 @@ class BuiltInToolService {
 
             // 建日志失败会导致工具结果没有落点：结果仍会喂给模型、UI 也能显示，
             // 但重载后这个工具调用就消失了。这里把上下文一并打出来便于定位。
-            console.error('[BuiltInToolService] Failed to create built-in tool log:', error, {
+            log.error('[BuiltInToolService] Failed to create built-in tool log:', error, {
                 toolId: resolved.entity.tool_id,
                 toolCallId: options.toolCall.id,
                 messageId: options.toolCallMessageId,
@@ -419,7 +418,7 @@ class BuiltInToolService {
                     approval_state: 'pending',
                     approval_summary: approvalRequest.reason,
                 }).catch((error) => {
-                    console.error(
+                    log.error(
                         '[BuiltInToolService] Failed to update built-in tool approval state:',
                         error
                     );
@@ -464,7 +463,7 @@ class BuiltInToolService {
                         duration_ms: durationMs,
                         error_message: resolutionText,
                     }).catch((error) => {
-                        console.error(
+                        log.error(
                             '[BuiltInToolService] Failed to update rejected built-in tool log:',
                             error
                         );
@@ -498,7 +497,7 @@ class BuiltInToolService {
                     approval_state: 'approved',
                     approval_summary: approvalRequest.reason,
                 }).catch((error) => {
-                    console.error(
+                    log.error(
                         '[BuiltInToolService] Failed to update approved built-in tool log:',
                         error
                     );
@@ -523,7 +522,7 @@ class BuiltInToolService {
                 });
                 throw aiError;
             }
-            console.error(
+            log.error(
                 `[BuiltInToolService] Built-in tool execution failed: ${options.toolCall.name}`,
                 error
             );
@@ -543,7 +542,9 @@ class BuiltInToolService {
         });
 
         await updateBuiltInToolLogByCallId(options.toolCall.id, {
-            output: toolResult.result,
+            output: serializeAuditPayload(toolResult.result),
+            // 语义和结构化载荷会读回来重建工具卡片，不是审计字段：脱敏会改掉来源链接，
+            // 截断会破坏 JSON 契约，所以这两列保持原样。
             conversation_semantic_json: toolResult.conversationSemantic
                 ? JSON.stringify(toolResult.conversationSemantic)
                 : null,
@@ -559,10 +560,10 @@ class BuiltInToolService {
                       : 'error',
             duration_ms: durationMs,
             error_message: toolResult.isError
-                ? (toolResult.errorMessage ?? toolResult.result)
+                ? serializeAuditPayload(toolResult.errorMessage ?? toolResult.result)
                 : null,
         }).catch((error) => {
-            console.error('[BuiltInToolService] Failed to update built-in tool log:', error);
+            log.error('[BuiltInToolService] Failed to update built-in tool log:', error);
         });
 
         return {

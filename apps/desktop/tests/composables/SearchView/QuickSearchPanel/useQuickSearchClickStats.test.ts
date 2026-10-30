@@ -1,4 +1,5 @@
 import type { QuickShortcutItem } from '@services/NativeService';
+import { log } from '@services/ObservabilityService';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useQuickSearchClickStats } from '@/views/SearchView/components/QuickSearchPanel/composables/useQuickSearchClickStats';
@@ -82,13 +83,27 @@ describe('when the quick search panel ranks results by what the user clicks', ()
 
     it('user still sees results in their original order when click history cannot be read', async () => {
         const stats = useQuickSearchClickStats();
-        const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
         const alpha = createShortcut('Alpha', 'D:/Alpha.lnk');
         const beta = createShortcut('Beta', 'D:/Beta.lnk');
 
         findQuickSearchClicksByQueryMock.mockRejectedValue(new Error('sqlite unavailable'));
 
         await expect(stats.rankResults('alpha', [alpha, beta])).resolves.toEqual([alpha, beta]);
-        expect(consoleWarnSpy).toHaveBeenCalled();
+        expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('user gets the click counted even when it cannot be saved', async () => {
+        const stats = useQuickSearchClickStats();
+        const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+        const foo = createShortcut('Foo', 'D:/Tools/Foo.lnk');
+        const bar = createShortcut('Bar', 'D:/Tools/Bar.lnk');
+        upsertQuickSearchClickMock.mockRejectedValue(new Error('sqlite unavailable'));
+
+        stats.recordClick('touch', 'D:/Tools/Foo.lnk');
+        await flushAsyncWork();
+
+        await expect(stats.rankResults('touch', [bar, foo])).resolves.toEqual([foo, bar]);
+        expect(warnSpy).toHaveBeenCalled();
     });
 });

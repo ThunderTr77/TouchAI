@@ -49,6 +49,8 @@ Exceptions: exploratory spikes, pure layout tweaks, config changes. Say why in t
 ```bash
 pnpm test              # Vitest watch mode (development)
 pnpm test:unit         # Single run (CI mode)
+pnpm test:ci           # Repository workflow, dependency, and design guard contract tests
+pnpm test:ui-preview   # UI preview workflow and helper tests
 pnpm test:coverage     # Run with frontend coverage report
 pnpm test:e2e          # Desktop E2E smoke (requires tauri-driver)
 pnpm site:build        # Build the Astro Starlight site
@@ -87,6 +89,7 @@ The keys must stay at the top level of `thresholds`. A nested `global` object is
 **The floor alone is not enough for a pull request.** A global percentage cannot see a change that adds 400 uncovered lines while covering 400 old ones: the total stays flat and the gate stays green. So the `frontend-tests` job also runs a **patch coverage** check (`scripts/ci/coverage/patch-coverage.mjs`), which takes the lines the diff added to `apps/desktop/src` and asks the v8 report how many of them ran. It fails below **85%**.
 
 - A changed source file that no test ever loaded counts as fully uncovered, which is the point: new behaviour has to arrive with a test that exercises it.
+- Only files the report can contain are measured: `apps/desktop/src/**/*.{ts,vue}`, mirroring `coverage.include`. A generated snapshot, a stylesheet or an asset under `src` is skipped instead of counting as uncovered, because it can never appear in the v8 report.
 - Blank lines, comments and closing braces carry no statement, so they are skipped rather than counted as failures.
 - Deleted lines, test files and scripts are out of scope.
 - Run it locally with `pnpm test:coverage:patch` after `pnpm test:coverage`.
@@ -127,6 +130,11 @@ Rust branch coverage is **not** collected: `--branch` needs nightly, and this jo
 ## File Placement
 
 ```
+tests/ci/
+├── workflows/             # Workflow and CODEOWNERS contracts
+├── repository/            # Lockfile and dependency policy contracts
+├── design-system/         # ESLint design-system guard contract
+└── ui-preview/            # UI preview workflow and helper contracts
 apps/desktop/tests/
 ├── setup/                  # Vitest global setup, Tauri mocks
 ├── utils/                  # Shared test helpers and fixtures
@@ -141,6 +149,8 @@ apps/desktop/src-tauri/tests/ # Rust integration / command tests
 ```
 
 - Frontend tests: `apps/desktop/tests/**/*.test.ts`, mirroring the `src/` structure (`src/services/PopupService/manager.ts` → `tests/services/PopupService/manager.test.ts`)
+- Repository CI tests: `tests/ci/**/*.test.ts`. Workflow and CODEOWNERS contracts live in `tests/ci/workflows/`; lockfile policy in `tests/ci/repository/`; ESLint design-system guards in `tests/ci/design-system/`. A test that imports `apps/desktop/scripts/**` stays in `apps/desktop/tests/ci/`, because it covers desktop build or release tooling.
+- UI preview tests: `tests/ci/ui-preview/**/*.test.js`, colocated with the repository automation they cover.
 - Desktop E2E: `apps/desktop/e2e-tests/**/*.e2e.js`
 - Rust unit tests: `#[cfg(test)]` within the module
 - Rust integration tests: `apps/desktop/src-tauri/tests/**/*.rs`
@@ -156,6 +166,8 @@ apps/desktop/src-tauri/tests/ # Rust integration / command tests
 **Tauri commands.** Use `tauri::test` for parameter parsing, state wiring, and return shapes. One clear contract per test; do not re-cover lower-level logic.
 
 **Desktop E2E.** Critical cross-layer flows only (launch, search, settings). Do not use E2E for logic unit tests already cover reliably.
+
+**Visual regression.** Component primitives (`pnpm test:visual`) and application windows (`pnpm test:e2e`) are compared against committed PNG baselines in CI; regenerate an intended difference with `/approve-visuals` on the pull request.
 
 ## Naming Tests
 
