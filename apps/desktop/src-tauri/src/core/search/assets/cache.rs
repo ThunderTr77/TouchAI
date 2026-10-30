@@ -172,10 +172,10 @@ pub(super) fn normalize_icon_cache_key(path: &str, size: u32) -> String {
 /// 包含文件修改时间和大小作为指纹，文件内容变化后缓存自动失效。
 pub(super) fn normalize_thumbnail_cache_key(path: &str, size: u32) -> String {
     let normalized_path = path.replace('/', "\\").to_lowercase();
-    let (modified_secs, file_size) = file_fingerprint(path);
+    let (modified_nanos, file_size) = file_fingerprint(path);
     format!(
         "{}|{}|{}|{}|{}",
-        CACHE_KEY_PREFIX_THUMB, normalized_path, modified_secs, file_size, size
+        CACHE_KEY_PREFIX_THUMB, normalized_path, modified_nanos, file_size, size
     )
 }
 
@@ -241,19 +241,19 @@ fn is_image_extension(extension: &str) -> bool {
     )
 }
 
-/// 获取文件的修改时间（UNIX 秒）和大小（字节），用于缩略图缓存键指纹。
-fn file_fingerprint(path: &str) -> (u64, u64) {
+/// Returns the file's Unix nanosecond modification time and byte length.
+fn file_fingerprint(path: &str) -> (u128, u64) {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(_) => return (0, 0),
     };
-    let modified_secs = metadata
+    let modified_nanos = metadata
         .modified()
         .ok()
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
+        .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    (modified_secs, metadata.len())
+    (modified_nanos, metadata.len())
 }
 
 /// 对缓存键做双重哈希，生成 32 字符十六进制文件名。
@@ -332,4 +332,46 @@ fn reencode_image_bytes_to_jpeg(bytes: &[u8], quality: u8) -> Result<Vec<u8>, St
         .encode(&rgb_bytes, width, height, ColorType::Rgb8.into())
         .map_err(|err| format!("Failed to encode cache image to JPEG: {}", err))?;
     Ok(jpeg_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_thumbnail_cache_key, IconCache};
+    use std::{
+        fs::{self, OpenOptions},
+        time::{Duration, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn user_gets_fresh_thumbnail_when_same_size_image_changes_within_one_second() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let image = temp.path().join("photo.png");
+        fs::write(&image, b"old").expect("first image");
+        let set_modified = |nanos| {
+            OpenOptions::new()
+                .write(true)
+                .open(&image)
+                .expect("image handle")
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_modified(UNIX_EPOCH + Duration::new(1_700_000_000, nanos)),
+                )
+                .expect("set modification time");
+        };
+        set_modified(100_000_000);
+        let path = image.to_string_lossy();
+        let first_key = normalize_thumbnail_cache_key(&path, 64);
+        let mut cache = IconCache::default();
+        cache.insert(first_key.clone(), "old thumbnail".to_string());
+
+        fs::write(&image, b"new").expect("replacement image");
+        set_modified(900_000_000);
+        let second_key = normalize_thumbnail_cache_key(&path, 64);
+
+        assert_ne!(first_key, second_key);
+        assert_eq!(cache.get(&second_key), None);
+        cache.insert(second_key.clone(), "new thumbnail".to_string());
+        assert_eq!(cache.get(&second_key), Some("new thumbnail".to_string()));
+        assert_eq!(second_key, normalize_thumbnail_cache_key(&path, 64));
+    }
 }
