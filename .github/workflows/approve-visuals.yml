@@ -60,13 +60,24 @@ name: Approve visual baselines
 #     /approve-visuals components   regenerate the component layer only
 #     /approve-visuals e2e          regenerate the app (WebView2) layer only
 #
+# The command has to start a line, and it has to come from a person. The visual report
+# itself mentions `/approve-visuals` in a sentence, and the report is posted as a bot, so a
+# substring match made every first report start a run that failed the write-access check.
+# A reply that quotes the hint is the same hazard for a human: it would push a baseline
+# commit nobody asked for.
+#
 # The shape of the file follows from the two layers being the same job with different
 # inputs. `plan` decides which layers were asked for; one matrix job then regenerates
 # each of them, serialised so the two commits land one after the other. The layers differ
 # only in which workflow to dispatch, which artifact to download, which directory to
-# commit and what to call the commit, so those four values are the matrix and everything
-# else is shared. A job per layer meant two copies of the dispatch, wait, download and
-# push steps, which is how they drifted apart before.
+# commit and what to call the commit, so those four values are the matrix entries and
+# everything else is shared. A job per layer meant two copies of the dispatch, wait,
+# download and push steps, which is how they drifted apart before.
+#
+# `plan` emits the matrix itself rather than a list of layer names. A job-level `if`
+# cannot read `matrix` — GitHub rejects the file, since the matrix is not expanded when
+# the condition is evaluated — and a static `include` entry that matches no requested
+# layer is expanded into a job of its own, so filtering has to happen before the matrix.
 #
 # There is no separate report job. The outcome is a status line handed to
 # `visual-comment.mjs`, which writes it into the one pull request comment the comparison
@@ -93,11 +104,13 @@ jobs:
     plan:
         name: Decide what to regenerate
         # `issue_comment` fires for plain issues too and carries write permissions, so
-        # the trigger is narrowed to "a pull request" and "a comment that contains the
-        # command". Whether the author may actually run it is decided by the first step
-        # below, which asks the API for the real permission.
+        # the trigger is narrowed to "a pull request", "a person" and "a comment that
+        # mentions the command". Whether the author may actually run it is decided by a
+        # step below, which asks the API for the real permission; whether the comment
+        # really is the command is decided by the parse step.
         if: |
             github.event.issue.pull_request &&
+            github.event.comment.user.type != 'Bot' &&
             contains(github.event.comment.body, '/approve-visuals')
         runs-on: ubuntu-latest
         permissions:
@@ -108,15 +121,75 @@ jobs:
             # never touches the branch.
             pull-requests: write
         outputs:
-            layers: ${{ steps.parse.outputs.layers }}
+            command: ${{ steps.parse.outputs.command }}
+            matrix: ${{ steps.parse.outputs.matrix }}
             head_ref: ${{ steps.pr.outputs.head_ref }}
         steps:
+            - name: Parse the requested layers
+              id: parse
+              env:
+                  COMMENT_BODY: ${{ github.event.comment.body }}
+              run: |
+                  set -euo pipefail
+                  # The body arrives through the environment, never interpolated into
+                  # the script, so a comment cannot smuggle shell syntax into the run.
+                  body="$(printf '%s' "$COMMENT_BODY")"
+
+                  # Anchored to the start of a line: the report comment and any reply that
+                  # quotes the hint contain the command mid-sentence, and neither is an
+                  # approval. The first matching line is the command; its arguments decide
+                  # which layers run.
+                  command_line="$(printf '%s' "$body" | grep -iE '^[[:space:]]*/approve-visuals([[:space:]]|$)' | head -n1 || true)"
+
+                  if [ -z "$command_line" ]; then
+                      echo "command=false" >> "$GITHUB_OUTPUT"
+                      echo 'No /approve-visuals command line in this comment; nothing to do.'
+                      exit 0
+                  fi
+
+                  echo "command=true" >> "$GITHUB_OUTPUT"
+
+                  # Every input a layer needs, in the order the layers run. This is the
+                  # one place a layer is defined: the selection below narrows this list,
+                  # it does not repeat it.
+                  catalog='[
+                    {"layer":"components","workflow":"visual-components.yml","artifact":"component-baselines","snapshots":"apps/desktop/tests/visual/__snapshots__","message":"test(ui): refresh the component visual baselines"},
+                    {"layer":"e2e","workflow":"e2e-smoke.yml","artifact":"visual-baselines","snapshots":"apps/desktop/e2e-tests/__snapshots__","message":"test(ui): refresh the app visual baselines"}
+                  ]'
+
+                  requested='[]'
+
+                  if printf '%s' "$command_line" | grep -qiE '/approve-visuals[[:space:]]+components'; then
+                      requested="$(printf '%s' "$requested" | jq -c '. + ["components"]')"
+                  fi
+
+                  if printf '%s' "$command_line" | grep -qiE '/approve-visuals[[:space:]]+e2e'; then
+                      requested="$(printf '%s' "$requested" | jq -c '. + ["e2e"]')"
+                  fi
+
+                  # A bare command means "everything that moved". Requiring the caller
+                  # to name a layer every time would make it easy to approve half a
+                  # change and leave the other half failing.
+                  if [ "$requested" = '[]' ]; then
+                      requested='["components","e2e"]'
+                  fi
+
+                  matrix="$(printf '%s' "$catalog" | jq -c --argjson requested "$requested" '[.[] | select(.layer as $layer | $requested | index($layer))]')"
+
+                  if [ "$(printf '%s' "$matrix" | jq 'length')" -eq 0 ]; then
+                      echo "::error::No layer matched the requested layers $requested; the catalog and the parser disagree."
+                      exit 1
+                  fi
+
+                  echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
             # `author_association` only says how the author relates to the repository,
             # not what they may do in it: an organisation member or a collaborator can
             # hold read-only or triage access. Rewriting the baselines needs push
             # access, so that is what is checked. Without this any member who can
             # comment could erase the evidence of a regression.
             - name: Require write access
+              if: steps.parse.outputs.command == 'true'
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   AUTHOR: ${{ github.event.comment.user.login }}
@@ -136,6 +209,7 @@ jobs:
 
             - name: Read the pull request
               id: pr
+              if: steps.parse.outputs.command == 'true'
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   PR_NUMBER: ${{ github.event.issue.number }}
@@ -153,51 +227,8 @@ jobs:
 
                   echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
 
-            - name: Parse the requested layers
-              id: parse
-              env:
-                  COMMENT_BODY: ${{ github.event.comment.body }}
-              run: |
-                  set -euo pipefail
-                  # The body arrives through the environment, never interpolated into
-                  # the script, so a comment cannot smuggle shell syntax into the run.
-                  body="$(printf '%s' "$COMMENT_BODY")"
-
-                  components=false
-                  e2e=false
-
-                  if printf '%s' "$body" | grep -qiE '/approve-visuals[[:space:]]+components'; then
-                      components=true
-                  fi
-
-                  if printf '%s' "$body" | grep -qiE '/approve-visuals[[:space:]]+e2e'; then
-                      e2e=true
-                  fi
-
-                  # A bare command means "everything that moved". Requiring the caller
-                  # to name a layer every time would make it easy to approve half a
-                  # change and leave the other half failing.
-                  if [ "$components" = false ] && [ "$e2e" = false ]; then
-                      components=true
-                      e2e=true
-                  fi
-
-                  # One JSON array rather than an output per layer: the matrix job asks
-                  # `contains(...)` once, and a third layer later is one more matrix entry
-                  # instead of one more condition to keep in sync with the others.
-                  layers='[]'
-
-                  if [ "$components" = true ]; then
-                      layers="$(printf '%s' "$layers" | jq -c '. + ["components"]')"
-                  fi
-
-                  if [ "$e2e" = true ]; then
-                      layers="$(printf '%s' "$layers" | jq -c '. + ["e2e"]')"
-                  fi
-
-                  echo "layers=$layers" >> "$GITHUB_OUTPUT"
-
             - name: Acknowledge the command
+              if: steps.parse.outputs.command == 'true'
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   COMMENT_ID: ${{ github.event.comment.id }}
@@ -214,10 +245,9 @@ jobs:
     regenerate:
         name: Regenerate ${{ matrix.layer }} baselines
         needs: plan
-        # `fromJSON`, because only the plan job knows which layers were asked for. A
-        # layer that was not requested has to skip without taking the other one with it,
-        # which chaining the two jobs with `needs:` could not express.
-        if: contains(fromJSON(needs.plan.outputs.layers), matrix.layer)
+        # A comment that merely mentions the command parses to `command=false` and leaves
+        # this job skipped, so quoting the hint costs nothing and touches no branch.
+        if: needs.plan.outputs.command == 'true'
         runs-on: ubuntu-latest
         permissions:
             # Checkout and the baseline commit.
@@ -231,20 +261,14 @@ jobs:
             # non-fast-forward, and it replaces the old `needs: [plan, components]`
             # chaining.
             max-parallel: 1
-            # The only things the two layers disagree on. Everything else is shared, so it
-            # lives in the steps below and cannot drift between them.
             matrix:
-                include:
-                    - layer: components
-                      workflow: visual-components.yml
-                      artifact: component-baselines
-                      snapshots: apps/desktop/tests/visual/__snapshots__
-                      message: 'test(ui): refresh the component visual baselines'
-                    - layer: e2e
-                      workflow: e2e-smoke.yml
-                      artifact: visual-baselines
-                      snapshots: apps/desktop/e2e-tests/__snapshots__
-                      message: 'test(ui): refresh the app visual baselines'
+                # The layers that were asked for, already narrowed by `plan`. Each entry
+                # is one job; `matrix` is unavailable in a job-level `if`, so a layer that
+                # was not requested has to be absent from the matrix rather than skipped
+                # by a condition. Each entry carries `layer`, `workflow`, `artifact`,
+                # `snapshots` and `message`; `plan` defines them and the steps below only
+                # read them, so the two layers cannot drift apart.
+                include: ${{ fromJSON(needs.plan.outputs.matrix) }}
         steps:
             # The push below has to be an ordinary push, so that its `push` event starts
             # the workflows whose checks the branch protection rule waits for. A token

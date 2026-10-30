@@ -1,0 +1,34 @@
+import { invoke } from './invoke';
+import type {
+    DiagnosticBundlePreview,
+    DiagnosticModeStatus,
+    ObservabilityLogEnvelope,
+} from './types';
+
+export const observability = {
+    ingest(batch: ObservabilityLogEnvelope[]): Promise<void> {
+        return invoke('obs_ingest', { batch });
+    },
+    /** 报告某个窗口已经刷完队列，供退出流程等待。 */
+    flushDone(window: string): Promise<void> {
+        return invoke('obs_flush_done', { window });
+    },
+    runId(): Promise<string> {
+        return invoke('obs_run_id');
+    },
+    setDiagnosticMode(enabled: boolean): Promise<DiagnosticModeStatus> {
+        return invoke('obs_set_diagnostic_mode', { enabled });
+    },
+    diagnosticModeStatus(): Promise<DiagnosticModeStatus> {
+        return invoke('obs_diagnostic_mode_status');
+    },
+    previewBundle(): Promise<DiagnosticBundlePreview> {
+        return invoke('obs_preview_bundle');
+    },
+    exportBundle(destination: string): Promise<DiagnosticBundlePreview> {
+        return invoke('obs_export_bundle', { destination });
+    },
+    dismissCrashes(): Promise<number> {
+        return invoke('obs_dismiss_crashes');
+    },
+} as const;
