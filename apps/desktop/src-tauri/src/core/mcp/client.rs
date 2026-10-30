@@ -2,7 +2,9 @@
 
 //! 基于 rmcp SDK 的 MCP 客户端实现。
 
+use super::redact::{http_connect_message, stdio_actual_command_message, stdio_connect_message};
 use super::types::*;
+use crate::core::observability::stderr::{append_chunk, attempt_buffer, buffer_for, SharedBuffer};
 use log::{debug, error, info, warn};
 use reqwest as mcp_reqwest;
 use rmcp::{
@@ -16,6 +18,15 @@ use rmcp::{
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
+
+/// 一次 stdio 连接尝试的 stderr 收集器。
+///
+/// `attempt` 只保存本次尝试的输出，用于连接失败时的错误文本；
+/// `task` 同时把同样的字节写进 per-server 历史，供诊断包使用。
+struct StderrCollector {
+    task: JoinHandle<std::io::Result<()>>,
+    attempt: SharedBuffer,
+}
 use tokio::{
     io::AsyncReadExt,
     process::ChildStderr,
@@ -58,10 +69,7 @@ impl McpClient {
         env: Option<HashMap<String, String>>,
         cwd: Option<String>,
     ) -> Result<(), String> {
-        info!(
-            "Connecting to MCP server {} (stdio): {} {:?}",
-            self.server_id, command, args
-        );
+        info!("{}", stdio_connect_message(self.server_id, &command, &args));
 
         self.set_status(ServerStatus::Connecting).await;
         self.clear_error().await;
@@ -80,8 +88,8 @@ impl McpClient {
         };
 
         info!(
-            "Actual command for MCP server {}: {} {:?}",
-            self.server_id, actual_command, actual_args
+            "{}",
+            stdio_actual_command_message(self.server_id, &actual_command, &actual_args)
         );
 
         // 使用 tokio::process::Command 构建命令
@@ -117,7 +125,7 @@ impl McpClient {
                 err_msg
             })?;
 
-        let stderr_collector = Self::spawn_stderr_collector(stderr);
+        let stderr_collector = Self::spawn_stderr_collector(self.server_id, stderr);
         let result = Self::format_stdio_connect_result(
             ().serve(transport).await.map_err(|e| e.to_string()),
             stderr_collector,
@@ -133,10 +141,7 @@ impl McpClient {
         url: String,
         headers: Option<HashMap<String, String>>,
     ) -> Result<(), String> {
-        info!(
-            "Connecting to MCP server {} (HTTP): {}",
-            self.server_id, url
-        );
+        info!("{}", http_connect_message(self.server_id, &url));
 
         self.set_status(ServerStatus::Connecting).await;
         self.clear_error().await;
@@ -163,15 +168,17 @@ impl McpClient {
     /// 实际的错误详情通常由服务器进程打印到 stderr
     /// 通过捕获 stderr，我们可以为用户提供更有帮助的错误消息
     ///
-    /// 32KB 限制可防止服务器大量输出 stderr 导致的内存耗尽
+    /// 64KB 限制可防止服务器大量输出 stderr 导致的内存耗尽。连接成功后
+    /// 收集任务继续读取并保留最后一段输出，避免管道写满阻塞 MCP 进程。
     fn spawn_stderr_collector(
+        server_id: i64,
         stderr: Option<ChildStderr>,
-    ) -> Option<(Arc<Mutex<Vec<u8>>>, JoinHandle<std::io::Result<()>>)> {
-        const MAX_CAPTURED_STDERR_BYTES: usize = 32 * 1024;
-
+    ) -> Option<StderrCollector> {
         stderr.map(|mut stderr| {
-            let output = Arc::new(Mutex::new(Vec::new()));
-            let output_clone = Arc::clone(&output);
+            let history = buffer_for(server_id);
+            // 连接失败时只报本次尝试的输出；历史缓冲继续累积给诊断包用。
+            let attempt = attempt_buffer();
+            let attempt_for_task = Arc::clone(&attempt);
 
             let task = tokio::spawn(async move {
                 let mut buffer = [0u8; 4096];
@@ -181,31 +188,26 @@ impl McpClient {
                         break;
                     }
 
-                    let mut stderr_output = output_clone.lock().await;
-                    // 达到限制后停止收集以防止内存问题
-                    if stderr_output.len() >= MAX_CAPTURED_STDERR_BYTES {
-                        continue;
-                    }
-
-                    let remaining = MAX_CAPTURED_STDERR_BYTES - stderr_output.len();
-                    stderr_output.extend_from_slice(&buffer[..bytes_read.min(remaining)]);
+                    append_chunk(&mut *history.lock().await, &buffer[..bytes_read]);
+                    append_chunk(&mut *attempt_for_task.lock().await, &buffer[..bytes_read]);
                 }
 
+                debug!("MCP server {} stderr stream closed", server_id);
                 Ok(())
             });
 
-            (output, task)
+            StderrCollector { task, attempt }
         })
     }
 
     async fn format_stdio_connect_result(
         result: Result<McpService, String>,
-        stderr_collector: Option<(Arc<Mutex<Vec<u8>>>, JoinHandle<std::io::Result<()>>)>,
+        stderr_collector: Option<StderrCollector>,
     ) -> Result<McpService, String> {
         match result {
             Ok(service) => {
-                if let Some((_output, task)) = stderr_collector {
-                    drop(task);
+                if let Some(collector) = stderr_collector {
+                    drop(collector.task);
                 }
                 Ok(service)
             }
@@ -220,10 +222,8 @@ impl McpClient {
     ///
     /// 连接失败后，我们给 stderr 收集任务 300ms 的时间来完成读取
     /// 这通常足够捕获错误消息，但可以防止进程卡住时无限期挂起
-    async fn collect_stderr_output(
-        stderr_collector: Option<(Arc<Mutex<Vec<u8>>>, JoinHandle<std::io::Result<()>>)>,
-    ) -> Option<String> {
-        let Some((output, mut task)) = stderr_collector else {
+    async fn collect_stderr_output(stderr_collector: Option<StderrCollector>) -> Option<String> {
+        let Some(StderrCollector { mut task, attempt }) = stderr_collector else {
             return None;
         };
 
@@ -242,9 +242,9 @@ impl McpClient {
             }
         }
 
-        let output = output.lock().await;
-        let stderr_output = String::from_utf8_lossy(&output).trim().to_string();
-        (!stderr_output.is_empty()).then_some(stderr_output)
+        let output = attempt.lock().await;
+        let stderr_output = super::redact_stderr(&String::from_utf8_lossy(&output));
+        (!stderr_output.trim().is_empty()).then_some(stderr_output)
     }
 
     /// 智能地合并 stderr 输出和 SDK 错误消息
@@ -279,7 +279,8 @@ impl McpClient {
                 ) {
                     header_values.insert(name, val);
                 } else {
-                    warn!("Skipping invalid header: {}={}", key, value);
+                    warn!("Skipping invalid header: {}", key);
+                    debug!("Invalid header value length: {}", value.len());
                 }
             }
             client_builder = client_builder.default_headers(header_values);
@@ -321,10 +322,18 @@ impl McpClient {
                 Ok(())
             }
             Err(e) => {
-                let err_msg = if e.contains('\n') {
-                    format!("Failed to connect via {}:\n{}", transport_name, e)
+                // SDK 错误可能带命令行、URL 或请求头，进入日志和 UI 前统一脱敏。
+                let redacted_error = super::redact_stderr(&e);
+                let err_msg = if redacted_error.contains('\n') {
+                    format!(
+                        "Failed to connect via {}:\n{}",
+                        transport_name, redacted_error
+                    )
                 } else {
-                    format!("Failed to connect via {}: {}", transport_name, e)
+                    format!(
+                        "Failed to connect via {}: {}",
+                        transport_name, redacted_error
+                    )
                 };
                 error!("{}", err_msg);
                 self.set_error(err_msg.clone()).await;

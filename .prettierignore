@@ -71,3 +71,6 @@ apps/desktop/.vite-cache/
 
 # WiX installer templates
 *.wxs
+
+# The JSON report the component visual layer writes when CI runs it
+apps/desktop/test-results/

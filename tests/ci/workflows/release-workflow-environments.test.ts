@@ -1,0 +1,168 @@
+import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { describe, expect, it } from 'vitest';
+
+const testDirectory = dirname(fileURLToPath(import.meta.url));
+const repositoryRoot = resolve(testDirectory, '../../..');
+
+async function readWorkflow(path: string) {
+    return readFile(resolve(repositoryRoot, '.github/workflows', path), 'utf8');
+}
+
+describe('release workflow deployment environments', () => {
+    it('refreshes release PRs with a dedicated bot token so required checks run', async () => {
+        const workflow = await readWorkflow('release-please.yml');
+
+        expect(workflow).toContain('Validate release bot token');
+        expect(workflow).toContain('RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}');
+        expect(workflow).toContain('token: ${{ secrets.RELEASE_PLEASE_TOKEN }}');
+        expect(workflow).not.toContain('github.token');
+        expect(workflow).not.toContain('secrets.RELEASE_PLEASE_TOKEN ||');
+    });
+
+    it('allows maintainers to manually refresh the release PR after token changes', async () => {
+        const workflow = await readWorkflow('release-please.yml');
+
+        expect(workflow).toContain('workflow_dispatch:');
+    });
+
+    it('formats Release Please generated files before pushing the release PR branch', async () => {
+        const workflow = await readWorkflow('release-please.yml');
+
+        expect(workflow).toContain('Read release PR branch');
+        expect(workflow).toContain('Sync Release Please lockfile version');
+        expect(workflow).toContain('node scripts/ci/set-release-version.mjs "$release_version"');
+        expect(workflow).toContain('Format Release Please generated files');
+        expect(workflow).toContain('Refresh model metadata snapshot');
+        expect(workflow).toContain('node scripts/ci/refresh-model-metadata-snapshot.mjs');
+        expect(workflow).toContain('Push release PR files');
+        expect(workflow).toContain("steps.release.outputs.prs_created == 'true'");
+        expect(workflow).toContain('pnpm exec prettier --write');
+        expect(workflow).toContain('--ignore-path .prettierignore');
+        expect(workflow).toContain('.release-please-manifest.json');
+        expect(workflow).toContain('apps/desktop/src-tauri/Cargo.lock');
+        expect(workflow).toContain('apps/desktop/src-tauri/tauri.conf.json');
+        expect(workflow).toContain(
+            'apps/desktop/src/services/AgentService/infrastructure/modelMetadata/snapshot.json'
+        );
+        expect(workflow).toContain('git commit --no-verify -m "chore: sync release please files"');
+        expect(workflow).toContain('git push origin HEAD:"$RELEASE_PR_BRANCH"');
+    });
+
+    it('keeps stable releases on the protected release environment by default', async () => {
+        const workflow = await readWorkflow('velopack-build.yml');
+
+        expect(workflow).toMatch(
+            /deployment-environment:\s*\n\s+required:\s+false\s*\n\s+type:\s+string\s*\n\s+default:\s+release/
+        );
+        expect(workflow).toContain('environment: ${{ inputs.deployment-environment }}');
+    });
+
+    it('routes prerelease and nightly deployments to the prerelease environment', async () => {
+        const workflow = await readWorkflow('release.yml');
+
+        expect(workflow).toContain('deployment-environment: prerelease');
+    });
+
+    it('skips scheduled nightly publishing when main has not changed', async () => {
+        const workflow = await readWorkflow('release.yml');
+
+        expect(workflow).toContain('should_publish: ${{ steps.release.outputs.should_publish }}');
+        expect(workflow).toContain('TARGET_COMMIT: ${{ github.sha }}');
+        expect(workflow).toContain('node scripts/ci/resolve-release-metadata.mjs');
+        expect(workflow).toContain("if: ${{ needs.resolve.outputs.should_publish == 'true' }}");
+        expect(workflow).toContain('$GITHUB_STEP_SUMMARY');
+        expect(workflow).toContain('::notice title=Prerelease skipped::');
+        expect(workflow).not.toContain('check-nightly-release-needed.mjs');
+    });
+
+    it('packs Windows releases as MSI without conflicting Velopack installer flags', async () => {
+        const workflow = await readWorkflow('velopack-build.yml');
+
+        expect(workflow).toContain('--msi');
+        expect(workflow).toContain('--noPortable');
+        expect(workflow).not.toMatch(/--noInst[\s\S]*--noPortable|--noPortable[\s\S]*--noInst/);
+    });
+
+    it('retries release Tauri builds when external binary downloads transiently fail', async () => {
+        const workflow = await readWorkflow('velopack-build.yml');
+
+        expect(workflow).toContain(
+            'node scripts/ci/retry-release-command.mjs -- pnpm tauri build --no-bundle --ci'
+        );
+        expect(workflow).toContain(
+            'node scripts/ci/retry-release-command.mjs -- pnpm tauri build --bundles app,dmg --ci'
+        );
+        expect(workflow).toContain(
+            'node scripts/ci/retry-release-command.mjs -- pnpm tauri build --bundles appimage,deb --ci'
+        );
+        expect(workflow).toContain(
+            'node scripts/ci/retry-release-command.mjs -- pnpm tauri bundle --bundles rpm --ci --config'
+        );
+        expect(workflow).not.toMatch(/run:\s+pnpm tauri build/);
+    });
+
+    it('bundles the Linux RPM with an RPM-safe version', async () => {
+        const workflow = await readWorkflow('velopack-build.yml');
+
+        expect(workflow).toContain('Build Linux RPM bundle');
+        expect(workflow).toContain('RELEASE_VERSION: ${{ inputs.version }}');
+        expect(workflow).toContain(
+            'rpm_config="$(node scripts/ci/rpm-bundle-config.mjs "$RELEASE_VERSION")"'
+        );
+        expect(workflow).toContain('--bundles rpm --ci --config "$rpm_config"');
+    });
+
+    it('attaches public release assets to GitHub releases from the staged asset directory', async () => {
+        const workflow = await readWorkflow('velopack-build.yml');
+        const uploadLine = workflow.split('\n').find((line) => line.includes('gh release upload'));
+
+        expect(workflow).toContain('Stage current GitHub release assets');
+        expect(workflow).toContain(
+            'node scripts/ci/stage-release-upload-assets.mjs "$RUNNER_TEMP/touchai-release-assets" "$RUNNER_TEMP/touchai-github-release-assets" "${{ inputs.version }}"'
+        );
+        expect(workflow).toContain('gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber');
+        expect(workflow).toContain('release_dir="$RUNNER_TEMP/touchai-github-release-assets"');
+        expect(uploadLine).toBeDefined();
+        expect(uploadLine ?? '').not.toContain('touchai-update-dist');
+    });
+
+    it('deploys the Cloudflare update proxy Worker with an R2 binding', async () => {
+        const workflow = await readWorkflow('velopack-build.yml');
+
+        expect(workflow).toContain('Generate Cloudflare update proxy config');
+        expect(workflow).toContain(
+            'node scripts/ci/write-cloudflare-update-worker-config.mjs "$wrangler_config"'
+        );
+        expect(workflow).toContain('Deploy Cloudflare update proxy Worker');
+        expect(workflow).toContain('pnpm dlx wrangler@3.90.0 deploy');
+        expect(workflow).toContain('--config "$WRANGLER_UPDATE_PROXY_CONFIG"');
+    });
+
+    it('prunes only old R2 release assets after GitHub release upload succeeds', async () => {
+        const workflow = await readWorkflow('velopack-build.yml');
+        const planIndex = workflow.indexOf('Plan archived R2 release asset pruning');
+        const deployIndex = workflow.indexOf('Deploy update release feeds to Cloudflare R2');
+        const pruneIndex = workflow.indexOf('Prune archived R2 release assets');
+        const planCommand = 'node scripts/ci/plan-r2-release-asset-prune.mjs "$RELEASE_CHANNEL"';
+        const planCommandIndex = workflow.indexOf(planCommand);
+        const pruneStep = workflow.slice(pruneIndex);
+
+        expect(workflow).toContain('RELEASE_CHANNEL: ${{ inputs.channel }}');
+        expect(workflow).toContain('prune_plan="$RUNNER_TEMP/touchai-r2-prune-plan.txt"');
+        expect(planIndex).toBeGreaterThan(-1);
+        expect(deployIndex).toBeGreaterThan(-1);
+        expect(pruneIndex).toBeGreaterThan(-1);
+        expect(planCommandIndex).toBeGreaterThan(planIndex);
+        expect(planCommandIndex).toBeLessThan(deployIndex);
+        expect(planIndex).toBeLessThan(deployIndex);
+        expect(deployIndex).toBeLessThan(pruneIndex);
+        expect(pruneStep).not.toContain(planCommand);
+        expect(workflow).toContain('wrangler@3.90.0 r2 object delete');
+        expect(workflow).toMatch(
+            /Upload public release assets to GitHub release[\s\S]*Deploy update release feeds to Cloudflare R2[\s\S]*Prune archived R2 release assets/
+        );
+    });
+});

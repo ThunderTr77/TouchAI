@@ -1,6 +1,7 @@
 // Copyright (c) 2026. Qian Cheng. Licensed under GPL v3
 
 import type { ProviderDriver } from '@database/schema';
+import { log } from '@services/ObservabilityService';
 import { type FinishReason, type LanguageModel, streamText } from 'ai';
 
 import { AiError, AiErrorCode } from '../../../contracts/errors';
@@ -30,6 +31,17 @@ import { buildModelMessages, buildToolSet } from './messages';
 import { normalizeResponsesReasoningStream } from './responsesStream';
 import { createAiSdkStreamProcessor } from './stream';
 import { createTauriFetch } from './tauriFetch';
+
+/**
+ * AI SDK 的 span 只在进程内交给本地 tracer，没有任何 exporter，因此不会离开本机。
+ * 以后接入远程遥测时，必须改成由用户开关控制，不能沿用这里的固定值。
+ */
+export const AI_SDK_TELEMETRY = {
+    isEnabled: true,
+    functionId: 'touchai.model.stream',
+    recordInputs: false,
+    recordOutputs: false,
+} as const;
 
 /**
  * base URL 只负责移除尾部斜杠，绝不追加供应商路径。
@@ -274,6 +286,7 @@ export abstract class AiSdkProviderBase implements AiProvider {
             includeRawChunks: this.shouldIncludeRawChunks(),
             // 禁用 AI SDK 内部重试，由应用层 runtime 统一管理重试与 UI 反馈
             maxRetries: 0,
+            experimental_telemetry: AI_SDK_TELEMETRY,
         });
 
         for await (const part of result.fullStream) {
@@ -413,7 +426,7 @@ export abstract class AiSdkProviderBase implements AiProvider {
         const mode = this.config.reasoning?.mode ?? 'auto';
         // 元数据声明不支持思考时，auto 模式不发任何 reasoning 参数（passthrough 除外）。
         if (options.supportsReasoning === false && mode !== 'passthrough') {
-            console.debug(
+            log.debug(
                 `[reasoning] skipped outbound model=${options.model} reason=metadata-declared-unsupported`
             );
             return undefined;
@@ -439,7 +452,7 @@ export abstract class AiSdkProviderBase implements AiProvider {
         const encoded = encodeReasoning(resolution, this.getReasoningEncodingHints());
         const providerOptions = this.remapReasoningProviderOptions(encoded.providerOptions);
 
-        console.debug(
+        log.debug(
             `[reasoning] outbound model=${resolution.modelId} format=${resolution.format} mode=${resolution.mode} source=${resolution.source} requested=${resolution.requested} level=${resolution.level} mapped=${resolution.mapped ?? '-'} hasTools=${hasTools} providerOptions=${JSON.stringify(providerOptions ?? {})}`
         );
 
