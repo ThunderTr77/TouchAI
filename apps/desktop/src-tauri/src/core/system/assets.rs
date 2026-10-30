@@ -4,6 +4,7 @@
 
 use log::{error, info, warn};
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use tauri::Emitter;
@@ -189,16 +190,38 @@ async fn download_from_url(url: &str) -> Result<Vec<u8>, String> {
 
 /// 尝试从所有 CDN 下载字体（单轮）
 async fn try_download_from_cdns() -> Result<Vec<u8>, String> {
-    for url in FONT_CDN_URLS {
-        match download_from_url(url).await {
-            Ok(data) => return Ok(data),
+    try_download_from_cdns_with(
+        FONT_CDN_URLS,
+        FONT_EXPECTED_SIZE_BYTES,
+        FONT_EXPECTED_SHA256,
+        |url| async move { download_from_url(&url).await },
+    )
+    .await
+}
+
+async fn try_download_from_cdns_with<F, Fut>(
+    urls: &[&str],
+    expected_size: u64,
+    expected_sha256: &str,
+    mut download: F,
+) -> Result<Vec<u8>, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, String>>,
+{
+    for url in urls {
+        match download((*url).to_string()).await {
+            Ok(data) => match validate_font_data(&data, expected_size, expected_sha256) {
+                Ok(()) => return Ok(data),
+                Err(error) => warn!("Invalid font from {}: {}", url, error),
+            },
             Err(e) => {
                 warn!("Failed to download from {}: {}", url, e);
             }
         }
     }
 
-    Err("All CDN sources failed in this round".to_string())
+    Err("No CDN supplied a valid font in this round".to_string())
 }
 
 /// 保存字体文件到本地
@@ -297,8 +320,9 @@ pub async fn initialize_font(app_handle: tauri::AppHandle) -> Result<(), String>
 mod tests {
     use super::sha256_hex;
     use super::{
-        is_valid_font_file, is_valid_font_file_with, replace_font_file, validate_font_data,
-        FONT_CDN_URLS, FONT_FILENAME, MAX_RETRY_ROUNDS,
+        is_valid_font_file, is_valid_font_file_with, replace_font_file,
+        try_download_from_cdns_with, validate_font_data, FONT_CDN_URLS, FONT_FILENAME,
+        MAX_RETRY_ROUNDS,
     };
     use tempfile::tempdir;
     use tokio::fs;
@@ -437,5 +461,44 @@ mod tests {
         assert!(!fs::try_exists(&source_path)
             .await
             .expect("check source path"));
+    }
+
+    #[tokio::test]
+    async fn user_gets_valid_font_from_second_cdn_when_first_returns_wrong_hash() {
+        let valid = b"expected font";
+        let expected_hash = sha256_hex(valid);
+
+        let downloaded = try_download_from_cdns_with(
+            &["first", "second"],
+            valid.len() as u64,
+            &expected_hash,
+            |url| async move {
+                match url.as_str() {
+                    "first" => Ok(b"incorrectfont".to_vec()),
+                    "second" => Ok(b"expected font".to_vec()),
+                    _ => unreachable!("unexpected CDN"),
+                }
+            },
+        )
+        .await
+        .expect("second CDN supplies the valid font");
+
+        assert_eq!(downloaded, valid);
+    }
+
+    #[tokio::test]
+    async fn user_gets_an_error_when_every_cdn_returns_invalid_font_bytes() {
+        let valid = b"expected font";
+        let expected_hash = sha256_hex(valid);
+
+        let result = try_download_from_cdns_with(
+            &["first", "second"],
+            valid.len() as u64,
+            &expected_hash,
+            |_url| async { Ok(b"invalid".to_vec()) },
+        )
+        .await;
+
+        assert!(result.is_err());
     }
 }

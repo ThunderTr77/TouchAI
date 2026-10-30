@@ -313,7 +313,7 @@ jobs:
                   node apps/desktop/scripts/ci/coverage/patch-coverage-cli.mjs
                   --coverage apps/desktop/.coverage/unit/coverage-final.json
                   --base "${{ github.event.pull_request.base.sha }}"
-                  --root apps/desktop
+                  --root .
                   --floor 85
 
             - name: Upload coverage artifact

@@ -419,14 +419,15 @@ impl QuickSearchManager {
 
             // 指纹只保留“最后修改时间 + 文件大小”这类廉价信息，
             // 目的是快速判断缓存里的目标解析结果是否还能复用。
-            let (modified_secs, file_size) = read_file_fingerprint(&shortcut_path);
+            let (modified_nanos, file_size) = read_file_fingerprint(&shortcut_path);
             let mut target_name: Option<String> = None;
             let mut target_path: Option<String> = None;
 
             cache_checks += 1;
             // 命中同指纹缓存时直接复用目标信息，避免重复解析 .lnk。
             if let Some(cache_entry) = cache.get(&path_norm) {
-                if cache_entry.modified_secs == modified_secs && cache_entry.file_size == file_size
+                if cache_entry.modified_nanos == modified_nanos
+                    && cache_entry.file_size == file_size
                 {
                     target_name = cache_entry.target_name.clone();
                     target_path = cache_entry.target_path.clone();
@@ -439,7 +440,7 @@ impl QuickSearchManager {
                 pending_targets.push(PendingTargetResolve {
                     path: path.clone(),
                     path_norm: path_norm.clone(),
-                    modified_secs,
+                    modified_nanos,
                     file_size,
                 });
             }
@@ -460,7 +461,7 @@ impl QuickSearchManager {
                 target_name,
                 target_path,
                 target_norm,
-                modified_secs,
+                modified_nanos,
                 file_size,
             });
         }
@@ -596,7 +597,7 @@ impl QuickSearchManager {
                 let mut updates_guard = lock_mutex(&updates_ref);
                 updates_guard.push(ResolvedTargetUpdate {
                     path_norm: task.path_norm.clone(),
-                    modified_secs: task.modified_secs,
+                    modified_nanos: task.modified_nanos,
                     file_size: task.file_size,
                     target_name: metadata.target_name,
                     target_path: metadata.target_path,
@@ -628,7 +629,7 @@ impl QuickSearchManager {
             for update in &updates {
                 if let Some(record) = state.records.iter_mut().find(|record| {
                     record.path_norm == update.path_norm
-                        && record.modified_secs == update.modified_secs
+                        && record.modified_nanos == update.modified_nanos
                         && record.file_size == update.file_size
                 }) {
                     record.target_name = update.target_name.clone();
@@ -643,7 +644,7 @@ impl QuickSearchManager {
                 cache.insert(
                     update.path_norm.clone(),
                     TargetCacheEntry {
-                        modified_secs: update.modified_secs,
+                        modified_nanos: update.modified_nanos,
                         file_size: update.file_size,
                         target_name: update.target_name.clone(),
                         target_path: update.target_path.clone(),

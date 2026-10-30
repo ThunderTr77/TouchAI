@@ -212,18 +212,55 @@ pub(super) fn normalize_path_str(path: &str) -> String {
     path.replace('/', "\\").to_lowercase()
 }
 
-pub(super) fn read_file_fingerprint(path: &Path) -> (u64, u64) {
+pub(super) fn read_file_fingerprint(path: &Path) -> (u128, u64) {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(_) => return (0, 0),
     };
 
     let file_size = metadata.len();
-    let modified_secs = metadata
+    let modified_nanos = metadata
         .modified()
         .ok()
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
+        .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    (modified_secs, file_size)
+    (modified_nanos, file_size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_file_fingerprint;
+    use std::{
+        fs::{self, OpenOptions},
+        time::{Duration, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn user_gets_fresh_shortcut_target_when_same_size_file_changes_within_one_second() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let shortcut = temp.path().join("app.lnk");
+        fs::write(&shortcut, b"old").expect("first shortcut");
+        let set_modified = |nanos| {
+            OpenOptions::new()
+                .write(true)
+                .open(&shortcut)
+                .expect("shortcut handle")
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_modified(UNIX_EPOCH + Duration::new(1_700_000_000, nanos)),
+                )
+                .expect("set modification time");
+        };
+        set_modified(100_000_000);
+        let first_fingerprint = read_file_fingerprint(&shortcut);
+
+        fs::write(&shortcut, b"new").expect("replacement shortcut");
+        set_modified(900_000_000);
+        let second_fingerprint = read_file_fingerprint(&shortcut);
+
+        assert_ne!(first_fingerprint, second_fingerprint);
+        assert_eq!(first_fingerprint.1, second_fingerprint.1);
+        assert_eq!(second_fingerprint, read_file_fingerprint(&shortcut));
+    }
 }

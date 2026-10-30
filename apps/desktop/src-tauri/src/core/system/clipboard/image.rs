@@ -52,6 +52,9 @@ impl ClipboardImageCache {
             .get_dynamic_image()
             .map_err(|error| error.to_string())?;
         let mut hasher = DefaultHasher::new();
+        dynamic_image.width().hash(&mut hasher);
+        dynamic_image.height().hash(&mut hasher);
+        dynamic_image.color().hash(&mut hasher);
         dynamic_image.as_bytes().hash(&mut hasher);
         let image_hash = hasher.finish();
 
@@ -75,7 +78,13 @@ impl ClipboardImageCache {
             return self.save_raw_clipboard_image_bytes(&bytes, "svg");
         }
 
-        let image = RustImageData::from_path(path).map_err(|error| error.to_string())?;
+        let image = image::ImageReader::open(path)
+            .map_err(|error| error.to_string())?
+            .with_guessed_format()
+            .map_err(|error| error.to_string())?
+            .decode()
+            .map_err(|error| error.to_string())?;
+        let image = RustImageData::from_dynamic_image(image);
         self.save_clipboard_image(image)
     }
 
@@ -271,21 +280,15 @@ pub(super) fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-/// 归一化剪贴板文件路径。
+/// Decode supported file URLs into native paths, preserving other clipboard entries.
 pub(super) fn normalize_clipboard_file_path(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("file:///") {
-        if rest.as_bytes().get(1) == Some(&b':') {
-            return rest.to_string();
-        }
-
-        return format!("/{}", rest);
-    }
-
-    if let Some(rest) = path.strip_prefix("file://") {
-        return rest.to_string();
-    }
-
-    path.to_string()
+    Url::parse(path)
+        .ok()
+        .filter(|url| url.scheme() == "file")
+        .and_then(|url| url.to_file_path().ok())
+        .map(|path| target_path_string(&path))
+        .filter(|path| !path.contains('\0'))
+        .unwrap_or_else(|| path.to_string())
 }
 
 /// 将剪贴板文件路径拆分为图片和普通文件。
@@ -389,6 +392,7 @@ fn target_path_string(path: &Path) -> String {
 mod tests {
     use std::fs;
 
+    use image::{DynamicImage, GrayImage, ImageBuffer, Luma, LumaA, RgbImage};
     use tempfile::TempDir;
 
     use super::*;
@@ -398,6 +402,106 @@ mod tests {
             Ok(_) => panic!("expected '{source}' to be refused"),
             Err(error) => error,
         }
+    }
+
+    fn image_cache(dir: &TempDir) -> ClipboardImageCache {
+        ClipboardImageCache {
+            image_dir: dir.path().to_path_buf(),
+            http_client: HttpClient::builder().build().expect("HTTP client"),
+        }
+    }
+
+    #[test]
+    fn user_gets_each_image_shape_preserved_when_pixel_bytes_match() {
+        let dir = TempDir::new().expect("cache directory");
+        let cache = image_cache(&dir);
+        let pixels = vec![255, 0, 0, 0, 255, 0];
+        let horizontal = RgbImage::from_raw(2, 1, pixels.clone()).expect("horizontal image");
+        let vertical = RgbImage::from_raw(1, 2, pixels.clone()).expect("vertical image");
+
+        let first = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(horizontal.into()))
+            .expect("cache horizontal image");
+        let second = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(vertical.into()))
+            .expect("cache vertical image");
+
+        let first_png = image::open(&first.0).expect("horizontal PNG");
+        let second_png = image::open(&second.0).expect("vertical PNG");
+        assert_eq!((first_png.width(), first_png.height()), (2, 1));
+        assert_eq!((second_png.width(), second_png.height()), (1, 2));
+        assert_eq!(first_png.as_bytes(), pixels);
+        assert_eq!(second_png.as_bytes(), pixels);
+        assert_ne!(first.0, second.0);
+        assert_ne!(first.1, second.1);
+    }
+
+    #[test]
+    fn user_gets_each_pixel_format_preserved_when_dimensions_and_bytes_match() {
+        let dir = TempDir::new().expect("cache directory");
+        let cache = image_cache(&dir);
+        let grayscale = DynamicImage::ImageLuma16(ImageBuffer::from_pixel(1, 1, Luma([0x1234])));
+        let grayscale_with_alpha = DynamicImage::ImageLumaA8(
+            ImageBuffer::<LumaA<u8>, _>::from_raw(1, 1, grayscale.as_bytes().to_vec())
+                .expect("grayscale image with alpha"),
+        );
+
+        let first = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(grayscale.clone()))
+            .expect("cache grayscale image");
+        let second = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(
+                grayscale_with_alpha.clone(),
+            ))
+            .expect("cache grayscale image with alpha");
+
+        let first_png = image::open(&first.0).expect("grayscale PNG");
+        let second_png = image::open(&second.0).expect("grayscale PNG with alpha");
+        assert_eq!(first_png.color(), grayscale.color());
+        assert_eq!(second_png.color(), grayscale_with_alpha.color());
+        assert_eq!(first_png.as_bytes(), grayscale.as_bytes());
+        assert_eq!(second_png.as_bytes(), grayscale_with_alpha.as_bytes());
+        assert_ne!(first.0, second.0);
+        assert_ne!(first.1, second.1);
+    }
+
+    #[test]
+    fn user_reuses_the_cached_image_when_its_dimensions_format_and_pixels_are_unchanged() {
+        let dir = TempDir::new().expect("cache directory");
+        let cache = image_cache(&dir);
+        let original = DynamicImage::ImageLuma8(GrayImage::from_pixel(2, 1, Luma([42])));
+
+        let first = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(original.clone()))
+            .expect("cache image");
+        let repeated = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(original.clone()))
+            .expect("cache identical image");
+
+        assert_eq!(first, repeated);
+        let cached = image::open(&repeated.0).expect("cached PNG");
+        assert_eq!((cached.width(), cached.height()), (2, 1));
+        assert_eq!(cached.as_bytes(), original.as_bytes());
+        assert_eq!(fs::read_dir(dir.path()).expect("cache entries").count(), 1);
+    }
+
+    #[test]
+    fn user_gets_updated_pixels_when_the_image_layout_is_unchanged() {
+        let dir = TempDir::new().expect("cache directory");
+        let cache = image_cache(&dir);
+        let first_image = DynamicImage::ImageLuma8(GrayImage::from_pixel(2, 1, Luma([42])));
+        let updated = DynamicImage::ImageLuma8(GrayImage::from_pixel(2, 1, Luma([84])));
+
+        let first = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(first_image))
+            .expect("cache first image");
+        let second = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(updated.clone()))
+            .expect("cache updated image");
+
+        assert_ne!(first, second);
+        let cached = image::open(&second.0).expect("updated PNG");
+        assert_eq!(cached.as_bytes(), updated.as_bytes());
     }
 
     // Clipboard images arrive as data URLs, as file paths, or as raw bytes with an unknown
@@ -513,14 +617,16 @@ mod tests {
         assert!(!path_has_image_extension("a", "svg"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn user_gets_a_windows_file_url_reduced_to_a_path() {
         assert_eq!(
             normalize_clipboard_file_path("file:///C:/tmp/a.png"),
-            "C:/tmp/a.png"
+            r"C:\tmp\a.png"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn user_gets_a_posix_file_url_reduced_to_an_absolute_path() {
         assert_eq!(
@@ -529,12 +635,28 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
-    fn user_gets_a_file_url_with_a_host_reduced_to_a_path() {
+    fn user_keeps_the_network_root_when_pasting_a_windows_file_url() {
         assert_eq!(
-            normalize_clipboard_file_path("file://server/share/a.png"),
-            "server/share/a.png"
+            normalize_clipboard_file_path("file://server/share/a%20b.png"),
+            r"\\server\share\a b.png"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_does_not_get_a_relative_path_when_pasting_an_unsupported_network_url() {
+        let source = "file://server/share/a.png";
+
+        assert_eq!(normalize_clipboard_file_path(source), source);
+    }
+
+    #[test]
+    fn user_keeps_a_non_file_url_unchanged_when_pasting_it_as_a_path() {
+        let source = "https://example.com/a%20b.png";
+
+        assert_eq!(normalize_clipboard_file_path(source), source);
     }
 
     #[test]
@@ -546,18 +668,117 @@ mod tests {
     }
 
     #[test]
+    fn user_reads_the_original_document_when_pasting_an_encoded_file_url() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("notes 世界 100% #1.txt");
+        fs::write(&path, b"original document").expect("write document");
+        let source = Url::from_file_path(&path).expect("file URL");
+
+        let (images, files) = split_clipboard_file_paths(vec![source.to_string()]);
+
+        assert!(images.is_empty());
+        assert_eq!(files, vec![target_path_string(&path)]);
+        assert_eq!(
+            fs::read(&files[0]).expect("read document"),
+            b"original document"
+        );
+    }
+
+    #[test]
+    fn user_gets_the_original_pixels_when_pasting_an_encoded_image_file_url() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("photo 世界 100% #1.png");
+        let pixels = image::RgbImage::from_pixel(2, 1, image::Rgb([19, 41, 83]));
+        pixels
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write PNG");
+        let source = Url::from_file_path(&path).expect("file URL");
+
+        let (images, files) = split_clipboard_file_paths(vec![source.to_string()]);
+
+        assert!(files.is_empty());
+        assert_eq!(images, vec![target_path_string(&path)]);
+        let cache = ClipboardImageCache {
+            image_dir: dir.path().to_path_buf(),
+            http_client: HttpClient::new(),
+        };
+        let (cached, _) = cache.save_image_file_path(&images[0]).expect("cache image");
+        assert_eq!(
+            image::open(cached).expect("read cached image").to_rgb8(),
+            pixels
+        );
+    }
+
+    #[test]
+    fn user_gets_the_original_svg_when_pasting_an_encoded_html_image_url() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("icon 世界 100% #1.svg");
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"1\"/>";
+        fs::write(&path, svg).expect("write SVG");
+        let source = Url::from_file_path(&path).expect("file URL");
+        let cache = ClipboardImageCache {
+            image_dir: dir.path().to_path_buf(),
+            http_client: HttpClient::new(),
+        };
+
+        let (cached, _) = cache
+            .resolve_html_image_source(source.as_str())
+            .expect("resolve file URL")
+            .expect("cached SVG");
+
+        assert_eq!(fs::read(cached).expect("read cached SVG"), svg);
+    }
+
+    #[test]
+    fn user_keeps_literal_percent_escapes_when_pasting_a_native_path() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = target_path_string(&dir.path().join("literal%20name.txt"));
+
+        assert_eq!(normalize_clipboard_file_path(&path), path);
+        let source = Url::from_file_path(&path).expect("file URL");
+        assert_eq!(normalize_clipboard_file_path(source.as_str()), path);
+    }
+
+    #[test]
+    fn user_gets_the_native_path_when_pasting_an_uppercase_file_url() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("photo name.png");
+        let source = Url::from_file_path(&path).expect("file URL");
+        let uppercase = source.as_str().replacen("file:", "FILE:", 1);
+
+        assert_eq!(
+            normalize_clipboard_file_path(&uppercase),
+            target_path_string(&path)
+        );
+    }
+
+    #[test]
+    fn user_does_not_get_a_native_path_from_a_file_url_containing_a_nul() {
+        let source = if cfg!(windows) {
+            "file:///C:/tmp/a%00.png"
+        } else {
+            "file:///tmp/a%00.png"
+        };
+
+        assert_eq!(normalize_clipboard_file_path(source), source);
+    }
+
+    #[test]
     fn user_gets_clipboard_paths_split_into_images_and_files() {
-        let (images, files) = split_clipboard_file_paths(vec![
-            "file:///C:/tmp/a.png".to_string(),
-            "file:///C:/tmp/b.txt".to_string(),
-            "file:///C:/tmp/c.webp".to_string(),
-        ]);
+        let dir = TempDir::new().expect("temp dir");
+        let paths = ["a.png", "b.txt", "c.webp"].map(|name| dir.path().join(name));
+        let sources = paths
+            .iter()
+            .map(|path| Url::from_file_path(path).expect("file URL").to_string())
+            .collect();
+
+        let (images, files) = split_clipboard_file_paths(sources);
 
         assert_eq!(
             images,
-            vec!["C:/tmp/a.png".to_string(), "C:/tmp/c.webp".to_string()]
+            vec![target_path_string(&paths[0]), target_path_string(&paths[2])]
         );
-        assert_eq!(files, vec!["C:/tmp/b.txt".to_string()]);
+        assert_eq!(files, vec![target_path_string(&paths[1])]);
     }
 
     #[test]
@@ -570,11 +791,12 @@ mod tests {
 
     #[test]
     fn user_gets_a_root_file_url_kept_as_the_root_path() {
-        // "file:///" names the filesystem root, not nothing; it is a file entry, not an image.
-        let (images, files) = split_clipboard_file_paths(vec!["file:///".to_string()]);
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        let source = Url::from_file_path(root).expect("root URL");
+        let (images, files) = split_clipboard_file_paths(vec![source.to_string()]);
 
         assert!(images.is_empty());
-        assert_eq!(files, vec!["/".to_string()]);
+        assert_eq!(files, vec![root.to_string()]);
     }
 
     #[test]
@@ -584,6 +806,104 @@ mod tests {
         fs::write(&path, [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]).expect("write");
 
         assert!(is_image_file_path(&target_path_string(&path)));
+    }
+
+    #[test]
+    fn user_gets_original_png_pixels_when_pasting_a_file_without_an_extension() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("screenshot");
+        let pixels = image::RgbImage::from_pixel(2, 1, image::Rgb([17, 43, 91]));
+        pixels
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write PNG");
+        let (images, files) = split_clipboard_file_paths(vec![target_path_string(&path)]);
+        assert!(files.is_empty());
+        assert_eq!(images, vec![target_path_string(&path)]);
+
+        let (cached, _) = cache_in(&dir)
+            .save_image_file_path(&images[0])
+            .expect("cache extensionless PNG");
+
+        assert_eq!(
+            image::open(cached).expect("read cached PNG").to_rgb8(),
+            pixels
+        );
+    }
+
+    #[test]
+    fn user_gets_an_extensionless_html_image_cached_from_its_file_url() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("pasted-image");
+        let pixels = image::RgbImage::from_pixel(1, 2, image::Rgb([7, 29, 61]));
+        pixels
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write PNG");
+        let source = Url::from_file_path(&path).expect("file URL");
+
+        let (cached, _) = cache_in(&dir)
+            .resolve_html_image_source(source.as_str())
+            .expect("resolve image")
+            .expect("cached image");
+
+        assert_eq!(
+            image::open(cached).expect("read cached PNG").to_rgb8(),
+            pixels
+        );
+    }
+
+    #[test]
+    fn user_gets_the_same_cache_entry_when_pasting_an_extensionless_image_again() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("screenshot");
+        image::RgbImage::from_pixel(1, 1, image::Rgb([2, 3, 5]))
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write PNG");
+        let cache = cache_in(&dir);
+        let source = target_path_string(&path);
+
+        let first = cache.save_image_file_path(&source).expect("first paste");
+        let second = cache.save_image_file_path(&source).expect("second paste");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            fs::read_dir(&cache.image_dir).expect("read cache").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn user_gets_no_cached_image_when_a_file_contains_invalid_image_bytes() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("broken.png");
+        fs::write(&path, b"not an image").expect("write invalid image");
+        let cache = cache_in(&dir);
+
+        assert!(cache
+            .save_image_file_path(&target_path_string(&path))
+            .is_err());
+        assert_eq!(
+            fs::read_dir(&cache.image_dir).expect("read cache").count(),
+            0
+        );
+    }
+
+    #[test]
+    fn user_gets_png_pixels_when_the_file_has_a_misleading_jpeg_extension() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("photo.jpg");
+        let pixels = image::RgbImage::from_pixel(1, 1, image::Rgb([11, 13, 17]));
+        pixels
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write PNG");
+
+        let (cached, _) = cache_in(&dir)
+            .save_image_file_path(&target_path_string(&path))
+            .expect("cache PNG content");
+
+        assert_eq!(
+            image::open(cached).expect("read cached PNG").to_rgb8(),
+            pixels
+        );
     }
 
     #[test]
@@ -698,5 +1018,14 @@ mod tests {
         push_unique(&mut values, "b".to_string());
 
         assert_eq!(values, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    fn cache_in(dir: &TempDir) -> ClipboardImageCache {
+        let image_dir = dir.path().join("cache");
+        fs::create_dir_all(&image_dir).expect("cache directory");
+        ClipboardImageCache {
+            image_dir,
+            http_client: HttpClient::new(),
+        }
     }
 }
