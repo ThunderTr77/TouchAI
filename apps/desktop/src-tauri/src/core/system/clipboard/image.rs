@@ -52,6 +52,9 @@ impl ClipboardImageCache {
             .get_dynamic_image()
             .map_err(|error| error.to_string())?;
         let mut hasher = DefaultHasher::new();
+        dynamic_image.width().hash(&mut hasher);
+        dynamic_image.height().hash(&mut hasher);
+        dynamic_image.color().hash(&mut hasher);
         dynamic_image.as_bytes().hash(&mut hasher);
         let image_hash = hasher.finish();
 
@@ -383,6 +386,7 @@ fn target_path_string(path: &Path) -> String {
 mod tests {
     use std::fs;
 
+    use image::{DynamicImage, GrayImage, ImageBuffer, Luma, LumaA, RgbImage};
     use tempfile::TempDir;
 
     use super::*;
@@ -392,6 +396,106 @@ mod tests {
             Ok(_) => panic!("expected '{source}' to be refused"),
             Err(error) => error,
         }
+    }
+
+    fn image_cache(dir: &TempDir) -> ClipboardImageCache {
+        ClipboardImageCache {
+            image_dir: dir.path().to_path_buf(),
+            http_client: HttpClient::builder().build().expect("HTTP client"),
+        }
+    }
+
+    #[test]
+    fn user_gets_each_image_shape_preserved_when_pixel_bytes_match() {
+        let dir = TempDir::new().expect("cache directory");
+        let cache = image_cache(&dir);
+        let pixels = vec![255, 0, 0, 0, 255, 0];
+        let horizontal = RgbImage::from_raw(2, 1, pixels.clone()).expect("horizontal image");
+        let vertical = RgbImage::from_raw(1, 2, pixels.clone()).expect("vertical image");
+
+        let first = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(horizontal.into()))
+            .expect("cache horizontal image");
+        let second = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(vertical.into()))
+            .expect("cache vertical image");
+
+        let first_png = image::open(&first.0).expect("horizontal PNG");
+        let second_png = image::open(&second.0).expect("vertical PNG");
+        assert_eq!((first_png.width(), first_png.height()), (2, 1));
+        assert_eq!((second_png.width(), second_png.height()), (1, 2));
+        assert_eq!(first_png.as_bytes(), pixels);
+        assert_eq!(second_png.as_bytes(), pixels);
+        assert_ne!(first.0, second.0);
+        assert_ne!(first.1, second.1);
+    }
+
+    #[test]
+    fn user_gets_each_pixel_format_preserved_when_dimensions_and_bytes_match() {
+        let dir = TempDir::new().expect("cache directory");
+        let cache = image_cache(&dir);
+        let grayscale = DynamicImage::ImageLuma16(ImageBuffer::from_pixel(1, 1, Luma([0x1234])));
+        let grayscale_with_alpha = DynamicImage::ImageLumaA8(
+            ImageBuffer::<LumaA<u8>, _>::from_raw(1, 1, grayscale.as_bytes().to_vec())
+                .expect("grayscale image with alpha"),
+        );
+
+        let first = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(grayscale.clone()))
+            .expect("cache grayscale image");
+        let second = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(
+                grayscale_with_alpha.clone(),
+            ))
+            .expect("cache grayscale image with alpha");
+
+        let first_png = image::open(&first.0).expect("grayscale PNG");
+        let second_png = image::open(&second.0).expect("grayscale PNG with alpha");
+        assert_eq!(first_png.color(), grayscale.color());
+        assert_eq!(second_png.color(), grayscale_with_alpha.color());
+        assert_eq!(first_png.as_bytes(), grayscale.as_bytes());
+        assert_eq!(second_png.as_bytes(), grayscale_with_alpha.as_bytes());
+        assert_ne!(first.0, second.0);
+        assert_ne!(first.1, second.1);
+    }
+
+    #[test]
+    fn user_reuses_the_cached_image_when_its_dimensions_format_and_pixels_are_unchanged() {
+        let dir = TempDir::new().expect("cache directory");
+        let cache = image_cache(&dir);
+        let original = DynamicImage::ImageLuma8(GrayImage::from_pixel(2, 1, Luma([42])));
+
+        let first = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(original.clone()))
+            .expect("cache image");
+        let repeated = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(original.clone()))
+            .expect("cache identical image");
+
+        assert_eq!(first, repeated);
+        let cached = image::open(&repeated.0).expect("cached PNG");
+        assert_eq!((cached.width(), cached.height()), (2, 1));
+        assert_eq!(cached.as_bytes(), original.as_bytes());
+        assert_eq!(fs::read_dir(dir.path()).expect("cache entries").count(), 1);
+    }
+
+    #[test]
+    fn user_gets_updated_pixels_when_the_image_layout_is_unchanged() {
+        let dir = TempDir::new().expect("cache directory");
+        let cache = image_cache(&dir);
+        let first_image = DynamicImage::ImageLuma8(GrayImage::from_pixel(2, 1, Luma([42])));
+        let updated = DynamicImage::ImageLuma8(GrayImage::from_pixel(2, 1, Luma([84])));
+
+        let first = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(first_image))
+            .expect("cache first image");
+        let second = cache
+            .save_clipboard_image(RustImageData::from_dynamic_image(updated.clone()))
+            .expect("cache updated image");
+
+        assert_ne!(first, second);
+        let cached = image::open(&second.0).expect("updated PNG");
+        assert_eq!(cached.as_bytes(), updated.as_bytes());
     }
 
     // Clipboard images arrive as data URLs, as file paths, or as raw bytes with an unknown
