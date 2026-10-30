@@ -3,6 +3,11 @@
 import { createMcpToolLog, updateMcpToolLogByCallId } from '@database/queries';
 import type { ModelWithProvider } from '@database/queries/models';
 import type { ProviderDriver } from '@database/schema';
+import type { Span } from '@opentelemetry/api';
+import { error as obsError, event, log } from '@services/ObservabilityService';
+import { ATTR } from '@services/ObservabilityService/attributes';
+import { serializeAuditPayload } from '@services/ObservabilityService/redact';
+import { withSpan } from '@services/ObservabilityService/tracing';
 
 import { tt } from '@/i18n';
 import {
@@ -214,6 +219,7 @@ export type AttemptFailureResult = Extract<AttemptExecutionResult, { type: 'fail
 export interface RunAttemptOptions extends RequestExecutionCallbacks {
     startCheckpoint: AttemptCheckpoint;
     persister: PersistenceProjector;
+    parentSpan?: Span;
 }
 
 function isProviderErrorDetails(value: unknown): value is ProviderErrorDetails {
@@ -277,6 +283,113 @@ function extractProviderErrorDetails(error: unknown): ProviderErrorDetails | nul
     }
 
     return Object.keys(details).length > 0 ? details : null;
+}
+
+/**
+ * 日志里只保留可以安全落盘的诊断字段。
+ * provider 错误对象上的 responseBody、requestBodyValues 和 data 都是正文，
+ * 完整内容仍随失败结果返回给调用方，但绝不写进日志。
+ */
+function summarizeProviderErrorDetails(details: ProviderErrorDetails): Record<string, unknown> {
+    const summary: Record<string, unknown> = {};
+
+    if (typeof details.statusCode === 'number') {
+        summary.statusCode = details.statusCode;
+    }
+    if (typeof details.url === 'string') {
+        summary.url = redactLogUrl(details.url);
+    }
+    if (details.responseBody !== undefined) {
+        summary.responseBodyBytes = serializedByteLength(details.responseBody);
+    }
+    if (details.requestBodyValues !== undefined) {
+        summary.requestBodyBytes = serializedByteLength(details.requestBodyValues);
+    }
+    if (details.data !== undefined) {
+        summary.dataBytes = serializedByteLength(details.data);
+    }
+
+    const providerErrorCode =
+        extractProviderErrorCode(details.data) ?? extractProviderErrorCode(details.responseBody);
+    if (providerErrorCode) {
+        summary.providerErrorCode = providerErrorCode;
+    }
+
+    return summary;
+}
+
+/** 错误本身进日志时同样要去掉可能夹带正文的 message。 */
+function describeErrorForLog(error: unknown): Record<string, unknown> {
+    if (!(error instanceof Error)) {
+        return { type: typeof error };
+    }
+
+    const details = extractProviderErrorDetails(error);
+    const description: Record<string, unknown> = { name: error.name };
+
+    if (details?.statusCode !== undefined) {
+        description.statusCode = details.statusCode;
+    }
+
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && code.length <= 64) {
+        description.code = code;
+    }
+
+    if (details?.responseBody !== undefined || details?.requestBodyValues !== undefined) {
+        description.messageLength = error.message.length;
+    } else {
+        description.message = redactLogText(error.message).slice(0, 300);
+    }
+
+    return description;
+}
+
+function extractProviderErrorCode(value: unknown): string | null {
+    if (!value || typeof value !== 'object') return null;
+
+    const record = value as Record<string, unknown>;
+    const nested = record.error;
+    const nestedRecord =
+        nested && typeof nested === 'object' ? (nested as Record<string, unknown>) : undefined;
+    const candidates = [nestedRecord?.code, nestedRecord?.type, record.code, record.type];
+
+    for (const candidate of candidates) {
+        if (typeof candidate === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(candidate)) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+function serializedByteLength(value: unknown): number | null {
+    try {
+        const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+        return serialized === undefined ? null : new TextEncoder().encode(serialized).length;
+    } catch {
+        return null;
+    }
+}
+
+const REDACTED_URL = '[redacted-url]';
+
+function redactLogUrl(raw: string): string {
+    try {
+        const url = new URL(raw);
+        url.username = '';
+        url.password = '';
+        url.search = '';
+        url.hash = '';
+        return url.toString();
+    } catch {
+        // 解析失败时无法判断 userinfo 和路径的边界，整体丢弃而不是猜。
+        return REDACTED_URL;
+    }
+}
+
+/** 错误文本里的 URL 同样可能带 userinfo 或 query，进日志前替换成脱敏形式。 */
+function redactLogText(text: string): string {
+    return text.replace(/\bhttps?:\/\/[^\s"'<>]+/gi, (match) => redactLogUrl(match));
 }
 
 function cloneAiMessages(messages: AiMessage[]): AiMessage[] {
@@ -458,7 +571,7 @@ export class AiRequestExecutor {
         reasoningLevel?: SelectableReasoningLevel,
         reasoningOptions?: ReasoningOption[]
     ): AsyncGenerator<AiStreamChunk, void, unknown> {
-        console.debug(
+        log.debug(
             `[AiRequestExecutor] Start stream request, model=${modelId}, messages=${messages.length}, tools=${tools?.length ?? 0}`
         );
         for await (const chunk of provider.stream({
@@ -560,12 +673,12 @@ export class AiRequestExecutor {
                 session_id: options.sessionId,
                 message_id: options.toolCallMessageId,
                 iteration: options.iteration,
-                input: JSON.stringify(options.toolArgs),
+                input: serializeAuditPayload(options.toolArgs),
                 status: 'pending',
             });
             toolLogId = toolLog.id;
         } catch (error) {
-            console.error('[AiRequestExecutor] Failed to create MCP tool log:', error);
+            log.error('[AiRequestExecutor] Failed to create MCP tool log:', error);
         }
 
         let toolResult: { result: string; isError: boolean; attachments?: AttachmentIndex[] };
@@ -583,7 +696,7 @@ export class AiRequestExecutor {
             });
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            console.error(
+            log.error(
                 `[AiRequestExecutor] MCP tool execution failed: ${options.toolCall.name}`,
                 error
             );
@@ -604,12 +717,12 @@ export class AiRequestExecutor {
         });
 
         await updateMcpToolLogByCallId(options.toolCall.id, {
-            output: toolResult.result,
+            output: serializeAuditPayload(toolResult.result),
             status: toolResult.isError ? 'error' : 'success',
             duration_ms: durationMs,
-            error_message: toolResult.isError ? toolResult.result : null,
+            error_message: toolResult.isError ? serializeAuditPayload(toolResult.result) : null,
         }).catch((error) => {
-            console.error('[AiRequestExecutor] Failed to update MCP tool log:', error);
+            log.error('[AiRequestExecutor] Failed to update MCP tool log:', error);
         });
 
         return {
@@ -759,7 +872,7 @@ export class AiRequestExecutor {
                     await options.persister.persistOutputProgress(parts);
                 })
                 .catch((error) => {
-                    console.error('[AiRequestExecutor] Failed to persist output parts:', error);
+                    log.error('[AiRequestExecutor] Failed to persist output parts:', error);
                 });
         };
         let activeTextPart: Extract<PersistedOutputPart, { type: 'text' }> | null = null;
@@ -1017,6 +1130,7 @@ export class AiRequestExecutor {
         options: {
             step: Extract<AttemptStepResult, { type: 'tool_calls' }>;
             persister: PersistenceProjector;
+            parentSpan?: Span;
         } & RequestExecutionCallbacks
     ): Promise<void> {
         this.emitToolEvent(options.onChunk, {
@@ -1034,15 +1148,24 @@ export class AiRequestExecutor {
 
         const toolResults = await Promise.all(
             options.step.toolCalls.map((toolCall) =>
-                this.executeToolCall(runtime, {
-                    toolCall,
-                    toolCallMessageId,
-                    persister: options.persister,
-                    signal: options.signal,
-                    onChunk: options.onChunk,
-                    requestToolApproval: options.requestToolApproval,
-                    requestUserQuestions: options.requestUserQuestions,
-                })
+                withSpan(
+                    'touchai.tool',
+                    {
+                        [ATTR.toolCallId]: toolCall.id,
+                        [ATTR.toolName]: toolCall.name,
+                    },
+                    () =>
+                        this.executeToolCall(runtime, {
+                            toolCall,
+                            toolCallMessageId,
+                            persister: options.persister,
+                            signal: options.signal,
+                            onChunk: options.onChunk,
+                            requestToolApproval: options.requestToolApproval,
+                            requestUserQuestions: options.requestUserQuestions,
+                        }),
+                    options.parentSpan
+                )
             )
         );
 
@@ -1083,6 +1206,11 @@ export class AiRequestExecutor {
             if (builtInToolId && !isError) {
                 runtime.executedBuiltInTools.add(builtInToolId);
             }
+            event('agent.tool.completed', {
+                [ATTR.toolCallId]: toolCall.id,
+                [ATTR.toolName]: toolCall.name,
+                'tool.success': !isError,
+            });
         }
 
         this.emitToolEvent(options.onChunk, {
@@ -1133,21 +1261,30 @@ export class AiRequestExecutor {
             while (true) {
                 throwIfAborted(options.signal);
 
-                const step = await this.consumeModelStep(runtime, {
-                    signal: options.signal,
-                    onChunk: options.onChunk,
-                    persister: options.persister,
-                    onAttachmentManifestResolved: async (request) => {
-                        try {
-                            await options.persister.syncDeliveryManifestRequest(request);
-                        } catch (error) {
-                            console.error(
-                                '[AiRequestExecutor] Failed to persist attachment delivery manifest request:',
-                                error
-                            );
-                        }
+                const step = await withSpan(
+                    'touchai.model',
+                    {
+                        [ATTR.requestModel]: runtime.activeModel.model_id,
+                        [ATTR.providerName]: runtime.activeModel.provider_name,
                     },
-                });
+                    () =>
+                        this.consumeModelStep(runtime, {
+                            signal: options.signal,
+                            onChunk: options.onChunk,
+                            persister: options.persister,
+                            onAttachmentManifestResolved: async (request) => {
+                                try {
+                                    await options.persister.syncDeliveryManifestRequest(request);
+                                } catch (error) {
+                                    log.error(
+                                        '[AiRequestExecutor] Failed to persist attachment delivery manifest request:',
+                                        error
+                                    );
+                                }
+                            },
+                        }),
+                    options.parentSpan
+                );
 
                 if (step.type === 'done') {
                     break;
@@ -1156,6 +1293,7 @@ export class AiRequestExecutor {
                 await this.runToolRound(runtime, {
                     step,
                     persister: options.persister,
+                    parentSpan: options.parentSpan,
                     signal: options.signal,
                     onChunk: options.onChunk,
                     requestToolApproval: options.requestToolApproval,
@@ -1165,7 +1303,7 @@ export class AiRequestExecutor {
                 runtime.iteration += 1;
                 resumeCheckpoint = this.commitCheckpoint(runtime);
                 await options.persister.persistCheckpoint(resumeCheckpoint).catch((error) => {
-                    console.error('[AiRequestExecutor] Failed to persist checkpoint:', error);
+                    log.error('[AiRequestExecutor] Failed to persist checkpoint:', error);
                 });
                 if (options.taskId) {
                     options.onTurnEvent?.({
@@ -1197,11 +1335,7 @@ export class AiRequestExecutor {
         } catch (error) {
             // AI SDK RetryError 包装了真正的错误——解包后传递给分类器
             const unwrapped = unwrapRetryError(error);
-            console.warn('[AiRequestExecutor] Request failed:', unwrapped, typeof unwrapped);
             const providerErrorDetails = extractProviderErrorDetails(unwrapped);
-            if (providerErrorDetails) {
-                console.warn('[AiRequestExecutor] Provider error details:', providerErrorDetails);
-            }
 
             // 先让 provider 自己分类，再 fallback 到通用启发式。
             // 分类器只负责提升错误信息，不能覆盖真正的请求失败原因。
@@ -1210,11 +1344,32 @@ export class AiRequestExecutor {
                 classifiedError =
                     runtime.provider.classifyError?.(unwrapped) ?? AiError.fromError(unwrapped);
             } catch (classificationError) {
-                console.warn(
+                log.warn(
                     '[AiRequestExecutor] Provider error classification failed:',
                     classificationError
                 );
                 classifiedError = AiError.fromError(unwrapped);
+            }
+
+            // 事件带的是分类后的 code，否则 429 之类只带状态码的失败会记成 unknown。
+            obsError(
+                'agent.request.failed',
+                classifiedError,
+                {
+                    [ATTR.providerName]: runtime.activeModel.provider_name,
+                    [ATTR.requestModel]: runtime.activeModel.model_id,
+                    ...(providerErrorDetails?.statusCode !== undefined
+                        ? { [ATTR.httpStatus]: providerErrorDetails.statusCode }
+                        : {}),
+                },
+                'Agent request failed'
+            );
+            log.warn('[AiRequestExecutor] Request failed:', describeErrorForLog(unwrapped));
+            if (providerErrorDetails) {
+                log.warn(
+                    '[AiRequestExecutor] Provider error details:',
+                    summarizeProviderErrorDetails(providerErrorDetails)
+                );
             }
 
             return {
