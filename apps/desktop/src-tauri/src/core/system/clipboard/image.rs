@@ -271,21 +271,15 @@ pub(super) fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-/// 归一化剪贴板文件路径。
+/// Decode supported file URLs into native paths, preserving other clipboard entries.
 pub(super) fn normalize_clipboard_file_path(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("file:///") {
-        if rest.as_bytes().get(1) == Some(&b':') {
-            return rest.to_string();
-        }
-
-        return format!("/{}", rest);
-    }
-
-    if let Some(rest) = path.strip_prefix("file://") {
-        return rest.to_string();
-    }
-
-    path.to_string()
+    Url::parse(path)
+        .ok()
+        .filter(|url| url.scheme() == "file")
+        .and_then(|url| url.to_file_path().ok())
+        .map(|path| target_path_string(&path))
+        .filter(|path| !path.contains('\0'))
+        .unwrap_or_else(|| path.to_string())
 }
 
 /// 将剪贴板文件路径拆分为图片和普通文件。
@@ -513,14 +507,16 @@ mod tests {
         assert!(!path_has_image_extension("a", "svg"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn user_gets_a_windows_file_url_reduced_to_a_path() {
         assert_eq!(
             normalize_clipboard_file_path("file:///C:/tmp/a.png"),
-            "C:/tmp/a.png"
+            r"C:\tmp\a.png"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn user_gets_a_posix_file_url_reduced_to_an_absolute_path() {
         assert_eq!(
@@ -529,12 +525,28 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
-    fn user_gets_a_file_url_with_a_host_reduced_to_a_path() {
+    fn user_keeps_the_network_root_when_pasting_a_windows_file_url() {
         assert_eq!(
-            normalize_clipboard_file_path("file://server/share/a.png"),
-            "server/share/a.png"
+            normalize_clipboard_file_path("file://server/share/a%20b.png"),
+            r"\\server\share\a b.png"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_does_not_get_a_relative_path_when_pasting_an_unsupported_network_url() {
+        let source = "file://server/share/a.png";
+
+        assert_eq!(normalize_clipboard_file_path(source), source);
+    }
+
+    #[test]
+    fn user_keeps_a_non_file_url_unchanged_when_pasting_it_as_a_path() {
+        let source = "https://example.com/a%20b.png";
+
+        assert_eq!(normalize_clipboard_file_path(source), source);
     }
 
     #[test]
@@ -546,18 +558,117 @@ mod tests {
     }
 
     #[test]
+    fn user_reads_the_original_document_when_pasting_an_encoded_file_url() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("notes 世界 100% #1.txt");
+        fs::write(&path, b"original document").expect("write document");
+        let source = Url::from_file_path(&path).expect("file URL");
+
+        let (images, files) = split_clipboard_file_paths(vec![source.to_string()]);
+
+        assert!(images.is_empty());
+        assert_eq!(files, vec![target_path_string(&path)]);
+        assert_eq!(
+            fs::read(&files[0]).expect("read document"),
+            b"original document"
+        );
+    }
+
+    #[test]
+    fn user_gets_the_original_pixels_when_pasting_an_encoded_image_file_url() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("photo 世界 100% #1.png");
+        let pixels = image::RgbImage::from_pixel(2, 1, image::Rgb([19, 41, 83]));
+        pixels
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write PNG");
+        let source = Url::from_file_path(&path).expect("file URL");
+
+        let (images, files) = split_clipboard_file_paths(vec![source.to_string()]);
+
+        assert!(files.is_empty());
+        assert_eq!(images, vec![target_path_string(&path)]);
+        let cache = ClipboardImageCache {
+            image_dir: dir.path().to_path_buf(),
+            http_client: HttpClient::new(),
+        };
+        let (cached, _) = cache.save_image_file_path(&images[0]).expect("cache image");
+        assert_eq!(
+            image::open(cached).expect("read cached image").to_rgb8(),
+            pixels
+        );
+    }
+
+    #[test]
+    fn user_gets_the_original_svg_when_pasting_an_encoded_html_image_url() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("icon 世界 100% #1.svg");
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"1\"/>";
+        fs::write(&path, svg).expect("write SVG");
+        let source = Url::from_file_path(&path).expect("file URL");
+        let cache = ClipboardImageCache {
+            image_dir: dir.path().to_path_buf(),
+            http_client: HttpClient::new(),
+        };
+
+        let (cached, _) = cache
+            .resolve_html_image_source(source.as_str())
+            .expect("resolve file URL")
+            .expect("cached SVG");
+
+        assert_eq!(fs::read(cached).expect("read cached SVG"), svg);
+    }
+
+    #[test]
+    fn user_keeps_literal_percent_escapes_when_pasting_a_native_path() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = target_path_string(&dir.path().join("literal%20name.txt"));
+
+        assert_eq!(normalize_clipboard_file_path(&path), path);
+        let source = Url::from_file_path(&path).expect("file URL");
+        assert_eq!(normalize_clipboard_file_path(source.as_str()), path);
+    }
+
+    #[test]
+    fn user_gets_the_native_path_when_pasting_an_uppercase_file_url() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("photo name.png");
+        let source = Url::from_file_path(&path).expect("file URL");
+        let uppercase = source.as_str().replacen("file:", "FILE:", 1);
+
+        assert_eq!(
+            normalize_clipboard_file_path(&uppercase),
+            target_path_string(&path)
+        );
+    }
+
+    #[test]
+    fn user_does_not_get_a_native_path_from_a_file_url_containing_a_nul() {
+        let source = if cfg!(windows) {
+            "file:///C:/tmp/a%00.png"
+        } else {
+            "file:///tmp/a%00.png"
+        };
+
+        assert_eq!(normalize_clipboard_file_path(source), source);
+    }
+
+    #[test]
     fn user_gets_clipboard_paths_split_into_images_and_files() {
-        let (images, files) = split_clipboard_file_paths(vec![
-            "file:///C:/tmp/a.png".to_string(),
-            "file:///C:/tmp/b.txt".to_string(),
-            "file:///C:/tmp/c.webp".to_string(),
-        ]);
+        let dir = TempDir::new().expect("temp dir");
+        let paths = ["a.png", "b.txt", "c.webp"].map(|name| dir.path().join(name));
+        let sources = paths
+            .iter()
+            .map(|path| Url::from_file_path(path).expect("file URL").to_string())
+            .collect();
+
+        let (images, files) = split_clipboard_file_paths(sources);
 
         assert_eq!(
             images,
-            vec!["C:/tmp/a.png".to_string(), "C:/tmp/c.webp".to_string()]
+            vec![target_path_string(&paths[0]), target_path_string(&paths[2])]
         );
-        assert_eq!(files, vec!["C:/tmp/b.txt".to_string()]);
+        assert_eq!(files, vec![target_path_string(&paths[1])]);
     }
 
     #[test]
@@ -570,11 +681,12 @@ mod tests {
 
     #[test]
     fn user_gets_a_root_file_url_kept_as_the_root_path() {
-        // "file:///" names the filesystem root, not nothing; it is a file entry, not an image.
-        let (images, files) = split_clipboard_file_paths(vec!["file:///".to_string()]);
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        let source = Url::from_file_path(root).expect("root URL");
+        let (images, files) = split_clipboard_file_paths(vec![source.to_string()]);
 
         assert!(images.is_empty());
-        assert_eq!(files, vec!["/".to_string()]);
+        assert_eq!(files, vec![root.to_string()]);
     }
 
     #[test]
