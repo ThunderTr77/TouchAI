@@ -256,6 +256,22 @@ export default defineConfig([
             'vue/no-restricted-class': ['error', ...TEMPLATE_PALETTE_PATTERNS],
         },
     },
+    /* First-party logs go through ObservabilityService so they carry a level,
+     * an event name and structured fields. Only the console interceptor and its
+     * internal failure path may touch console directly.
+     */
+    {
+        files: ['apps/desktop/src/**/*.{ts,vue}'],
+        rules: {
+            'no-console': 'error',
+        },
+    },
+    {
+        files: ['apps/desktop/src/services/ObservabilityService/**/*.ts'],
+        rules: {
+            'no-console': 'off',
+        },
+    },
     /*
      * Design-system enforcement, script half.
      *

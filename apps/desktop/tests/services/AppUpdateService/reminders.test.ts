@@ -7,6 +7,8 @@ import type { AppUpdateState } from '@services/AppUpdateService/types';
 import type { AppUpdateNotificationAction } from '@services/NativeService/types';
 import { describe, expect, it, vi } from 'vitest';
 
+import { log } from '@/services/ObservabilityService';
+
 const HOUR = 60 * 60 * 1000;
 
 function localTime(day: number, hour: number, minute = 0): number {
@@ -303,7 +305,7 @@ describe('user is reminded about an available update', () => {
     });
 
     it('user is not marked as reminded when the operating system rejects the notification', async () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
         const reminder = createReminder();
         reminder.show.mockRejectedValueOnce(new Error('notifications disabled'));
         try {
@@ -347,5 +349,27 @@ describe('user is reminded about an available update', () => {
         reminder.controller.dispose();
         expect(reminder.unsubscribe).toHaveBeenCalledTimes(1);
         expect(reminder.unlisten).toHaveBeenCalledTimes(1);
+    });
+
+    it('user still gets reminders when the saved history is unreadable', async () => {
+        const reminder = createReminder({ raw: '{not json' });
+
+        await reminder.controller.initialize();
+        await flushReminder();
+
+        expect(reminder.show).toHaveBeenCalledTimes(1);
+    });
+
+    it('user who opens a notification still reaches the update when opening the page fails once', async () => {
+        const reminder = createReminder();
+        reminder.openSettings.mockRejectedValueOnce(new Error('settings window unavailable'));
+        await reminder.controller.initialize();
+
+        reminder.action('update');
+        await flushReminder();
+        reminder.action('update');
+        await flushReminder();
+
+        expect(reminder.openSettings).toHaveBeenCalledTimes(2);
     });
 });
