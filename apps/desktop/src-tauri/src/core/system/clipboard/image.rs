@@ -78,7 +78,13 @@ impl ClipboardImageCache {
             return self.save_raw_clipboard_image_bytes(&bytes, "svg");
         }
 
-        let image = RustImageData::from_path(path).map_err(|error| error.to_string())?;
+        let image = image::ImageReader::open(path)
+            .map_err(|error| error.to_string())?
+            .with_guessed_format()
+            .map_err(|error| error.to_string())?
+            .decode()
+            .map_err(|error| error.to_string())?;
+        let image = RustImageData::from_dynamic_image(image);
         self.save_clipboard_image(image)
     }
 
@@ -803,6 +809,104 @@ mod tests {
     }
 
     #[test]
+    fn user_gets_original_png_pixels_when_pasting_a_file_without_an_extension() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("screenshot");
+        let pixels = image::RgbImage::from_pixel(2, 1, image::Rgb([17, 43, 91]));
+        pixels
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write PNG");
+        let (images, files) = split_clipboard_file_paths(vec![target_path_string(&path)]);
+        assert!(files.is_empty());
+        assert_eq!(images, vec![target_path_string(&path)]);
+
+        let (cached, _) = cache_in(&dir)
+            .save_image_file_path(&images[0])
+            .expect("cache extensionless PNG");
+
+        assert_eq!(
+            image::open(cached).expect("read cached PNG").to_rgb8(),
+            pixels
+        );
+    }
+
+    #[test]
+    fn user_gets_an_extensionless_html_image_cached_from_its_file_url() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("pasted-image");
+        let pixels = image::RgbImage::from_pixel(1, 2, image::Rgb([7, 29, 61]));
+        pixels
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write PNG");
+        let source = Url::from_file_path(&path).expect("file URL");
+
+        let (cached, _) = cache_in(&dir)
+            .resolve_html_image_source(source.as_str())
+            .expect("resolve image")
+            .expect("cached image");
+
+        assert_eq!(
+            image::open(cached).expect("read cached PNG").to_rgb8(),
+            pixels
+        );
+    }
+
+    #[test]
+    fn user_gets_the_same_cache_entry_when_pasting_an_extensionless_image_again() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("screenshot");
+        image::RgbImage::from_pixel(1, 1, image::Rgb([2, 3, 5]))
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write PNG");
+        let cache = cache_in(&dir);
+        let source = target_path_string(&path);
+
+        let first = cache.save_image_file_path(&source).expect("first paste");
+        let second = cache.save_image_file_path(&source).expect("second paste");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            fs::read_dir(&cache.image_dir).expect("read cache").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn user_gets_no_cached_image_when_a_file_contains_invalid_image_bytes() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("broken.png");
+        fs::write(&path, b"not an image").expect("write invalid image");
+        let cache = cache_in(&dir);
+
+        assert!(cache
+            .save_image_file_path(&target_path_string(&path))
+            .is_err());
+        assert_eq!(
+            fs::read_dir(&cache.image_dir).expect("read cache").count(),
+            0
+        );
+    }
+
+    #[test]
+    fn user_gets_png_pixels_when_the_file_has_a_misleading_jpeg_extension() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("photo.jpg");
+        let pixels = image::RgbImage::from_pixel(1, 1, image::Rgb([11, 13, 17]));
+        pixels
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write PNG");
+
+        let (cached, _) = cache_in(&dir)
+            .save_image_file_path(&target_path_string(&path))
+            .expect("cache PNG content");
+
+        assert_eq!(
+            image::open(cached).expect("read cached PNG").to_rgb8(),
+            pixels
+        );
+    }
+
+    #[test]
     fn user_gets_a_jpeg_detected_by_its_content() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("photo");
@@ -914,5 +1018,14 @@ mod tests {
         push_unique(&mut values, "b".to_string());
 
         assert_eq!(values, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    fn cache_in(dir: &TempDir) -> ClipboardImageCache {
+        let image_dir = dir.path().join("cache");
+        fs::create_dir_all(&image_dir).expect("cache directory");
+        ClipboardImageCache {
+            image_dir,
+            http_client: HttpClient::new(),
+        }
     }
 }
